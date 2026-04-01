@@ -1,6 +1,5 @@
-"""Data models for repl-mcp."""
+"""Data models for iterm2-mcp."""
 
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -13,33 +12,31 @@ def _generate_unique_name() -> str:
 
 
 @dataclass
-class Program:
-    """Represents a managed interactive program running in a PTY."""
+class Tab:
+    """Represents a tracked iTerm2 session (tab or pane)."""
 
     id: str = field(default_factory=_generate_unique_name)
-    command: str = ""
-    args: list[str] = field(default_factory=list)
-    pid: int = 0
-    pty_fd: int = -1
-    output_buffer: list[str] = field(default_factory=list)
-    is_running: bool = True
+    session_id: str = ""  # iTerm2 session ID (e.g. "w0t0p0")
+    tab_id: str = ""  # iTerm2 tab ID
+    window_id: str = ""  # iTerm2 window ID
+    name: str = ""  # Tab title
+    output_buffer: list[str] = field(default_factory=list)  # Accumulated output lines
+    is_alive: bool = True
     owner_agent: str = ""
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     read_cursors: dict[str, int] = field(
         default_factory=dict
     )  # agent_id -> position in output_buffer
-    last_io_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    process: subprocess.Popen | None = None
-    cwd: str = ""
-    env: dict[str, str] = field(default_factory=dict)
+    last_screen_lines: list[str] = field(default_factory=list)  # Previous screen snapshot
+    last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    def to_list_dict(self) -> dict:
-        """Return dict for list_programs response."""
+    def to_dict(self) -> dict:
+        """Return dict for list_tabs response."""
         return {
             "id": self.id,
-            "command": self.command,
-            "pid": self.pid,
-            "is_running": self.is_running,
+            "session_id": self.session_id,
+            "name": self.name,
+            "is_alive": self.is_alive,
             "owner_agent": self.owner_agent,
             "started_at": self.started_at.isoformat(),
         }
