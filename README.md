@@ -1,78 +1,112 @@
-# repl-mcp
+# iterm2-mcp
 
-A TUI application and MCP server that lets AI agents start, interact with, and manage interactive REPL programs (Python, shells, gdb, etc.), while giving humans full visibility and control through a terminal UI.
+A headless MCP server that lets AI agents control iTerm2 via its Python API. Agents connect over Streamable HTTP to create tabs, run commands, read output, and send control characters — across multiple iTerm2 sessions simultaneously.
 
 ```
-┌─────────────────────────────────────────────────┐
-│              repl-mcp (single process)           │
-│                                                  │
-│  ┌──────────────┐       ┌─────────────────────┐ │
-│  │  Textual TUI │◄─────►│   Program Manager   │ │
-│  │  (human I/O) │       │  (PTY pool, state)  │ │
-│  └──────────────┘       └──────────┬──────────┘ │
-│                                    │             │
-│  ┌──────────────┐                  │             │
-│  │  MCP HTTP    │◄─────────────────┘             │
-│  │  Server      │  Streamable HTTP               │
-│  │  (AI I/O)    │  port 8780 (configurable)      │
-│  └──────────────┘                                │
-└─────────────────────────────────────────────────┘
-         │
-         ▼
-   ┌───────────┐  ┌───────────┐  ┌───────────┐
-   │  PTY: gdb │  │ PTY: bash │  │PTY: python│
-   └───────────┘  └───────────┘  └───────────┘
+┌──────────────────────────────────────────────────┐
+│           iterm2-mcp (headless process)           │
+│                                                   │
+│  ┌──────────────────┐    ┌─────────────────────┐ │
+│  │  FastMCP Server   │◄──►│   iTerm2 Manager    │ │
+│  │  (Streamable HTTP)│    │  (connection, tabs,  │ │
+│  │  port 8780        │    │   output buffers)    │ │
+│  └──────────────────┘    └──────────┬──────────┘ │
+│                                     │             │
+│         MCP tools                   │ iterm2      │
+│         (9 tools)                   │ Python API  │
+└─────────────────────────────────────┼─────────────┘
+          ▲                           │
+          │ Streamable HTTP           │ Unix socket
+          │                           ▼
+   ┌──────┴──────┐           ┌──────────────┐
+   │  AI Agents  │           │    iTerm2    │
+   │ (Claude, etc)│          │ ┌────┬────┐  │
+   └─────────────┘           │ │tab1│tab2│  │
+                             │ ├────┼────┤  │
+                             │ │tab3│tab4│  │
+                             │ └────┴────┘  │
+                             └──────────────┘
 ```
+
+## How It Works
+
+iterm2-mcp runs as a standalone process that bridges AI agents to iTerm2:
+
+1. **Connects externally** to a running iTerm2 instance over its Unix domain socket (the same mechanism iTerm2 scripts use).
+2. **Exposes MCP tools** via a Streamable HTTP server that any MCP-compatible client can connect to.
+3. **Monitors output** using iTerm2's `ScreenStreamer` API — a background task per tracked session watches for screen changes, diffs consecutive snapshots, and accumulates new output into a buffer.
+4. **Per-agent read cursors** let multiple agents read the same tab independently. Agent A reading output doesn't consume it for Agent B.
+5. **Human-readable IDs** — tabs get memorable names like `bewildered-spectacles` instead of iTerm2's internal `w0t0p0` identifiers.
+
+### Output Detection (Screen Diffing)
+
+Since iTerm2 exposes screen contents (not a raw byte stream), iterm2-mcp detects new output by diffing consecutive screen snapshots:
+
+- When `ScreenStreamer` fires, the monitor captures all visible lines.
+- It finds the overlap between the previous and current screen (detecting scroll).
+- Lines after the overlap are treated as new output and appended to the buffer.
+- If the screen jumped entirely (e.g., `clear` was run), new non-empty lines that weren't in the previous screen are captured.
+
+This means the output buffer contains the **logical history** of what appeared in the terminal, not a character-by-character stream.
+
+### Write + Wait
+
+When an agent calls `write_to_terminal`, the server sends the text to iTerm2 and then waits for output to settle (no new output for 300ms, up to a 5s timeout). This lets the agent know how many lines a command produced before deciding what to do next.
 
 ## Features
 
-- **Full PTY support** — each managed program gets a real pseudo-terminal for correct interactive behavior (prompts, line editing, Ctrl+C, colors)
-- **MCP Streamable HTTP server** — AI agents connect over HTTP and use standard MCP tools to start programs, send input, read output, and send signals
-- **Textual TUI** — tabbed interface showing all managed programs with scrollable output, human input bar, and live status
-- **Color-coded I/O** — AI input shown in cyan, human input in green, program output in default terminal color
-- **Per-agent read cursors** — multiple agents can independently read output from the same program without missing data
-- **Program allowlist** — optionally restrict which executables agents can launch
+- **Multi-tab control** — create, close, and interact with any number of iTerm2 tabs concurrently
+- **Any-tab targeting** — every I/O tool takes a tab ID, so agents aren't limited to a single "active" tab
+- **Tab discovery** — auto-discover and adopt existing iTerm2 sessions, not just ones the agent created
+- **Per-agent read cursors** — multiple agents can independently track output from the same tab
+- **Screen snapshots** — `get_screen` returns exactly what's visible in a tab right now, including cursor position
+- **Control characters** — send Ctrl+C, Ctrl+D, Ctrl+Z, Escape, etc. to any tab
 - **Bearer token auth** — optional authentication for the MCP endpoint
-- **Idle detection** — programs with no I/O for 60+ seconds show a yellow idle indicator
-- **Human-readable IDs** — programs get memorable names like `bewildered-spectacles` instead of UUIDs
-- **Human-created programs** — start programs from the TUI with `Ctrl+N`; agents can adopt them via `adopt_program`
+- **Headless** — no TUI; iTerm2 itself is the UI, so you see everything the agent does in real time
+- **Human-readable IDs** — tabs get names like `bewildered-spectacles` via `unique-namer`
+- **Scrollback limit** — output buffer capped at 10,000 lines (configurable) to prevent unbounded memory growth
+
+## Prerequisites
+
+- **macOS** (iTerm2 is macOS-only)
+- **iTerm2** installed and running
+- **iTerm2 Python API enabled**: Preferences → General → Magic → ✅ Enable Python API
+- **Python 3.11+**
 
 ## Installation
 
-Requires Python 3.11+.
-
 ```bash
 # Clone and install
-git clone https://github.com/youruser/repl-mcp.git
+git clone https://github.com/pathtofile/repl-mcp.git
 cd repl-mcp
 pip install -e .
 
-# Or install with dev dependencies
+# Or with uv
+uv pip install -e .
+
+# Or install dev dependencies too
 pip install -e ".[dev]"
 ```
 
 ## Usage
 
-### Basic
+### Starting the Server
 
 ```bash
-# Start with defaults (port 8780, no auth)
-repl-mcp
+# Start with defaults (port 8780, localhost only)
+iterm2-mcp
 
-# Custom port
-repl-mcp --port 9000
+# Discover and track all existing iTerm2 sessions on startup
+iterm2-mcp --discover
 
 # With authentication
-repl-mcp --token my-secret-token
+iterm2-mcp --token my-secret-token
 
-# Generate a random token and start
-repl-mcp --token $(repl-mcp --generate-token 2>/dev/null)
-
-# Restrict allowed programs
-repl-mcp --allow python gdb bash
+# Verbose logging
+iterm2-mcp -v
 
 # All options
-repl-mcp --host 0.0.0.0 --port 9000 --token secret --allow python bash --scrollback 50000
+iterm2-mcp --host 127.0.0.1 --port 9000 --token secret --scrollback 50000 --discover -v
 ```
 
 ### CLI Options
@@ -83,26 +117,18 @@ repl-mcp --host 0.0.0.0 --port 9000 --token secret --allow python bash --scrollb
 | `--host HOST` | `127.0.0.1` | Host to bind to |
 | `--token TOKEN` | none | Bearer token for authentication |
 | `--generate-token` | — | Print a random token and exit |
-| `--allow PROGRAM...` | all allowed | Restrict which programs agents can start |
-| `--scrollback LINES` | `10000` | Max output lines kept per program |
-
-### TUI Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Ctrl+N` | Start a new program |
-| `Ctrl+T` | Focus the input bar |
-| `Ctrl+Q` | Quit |
-| Tab click | Switch between managed programs |
+| `--scrollback LINES` | `10000` | Max output lines buffered per tab |
+| `--discover` | off | Track all existing iTerm2 sessions on startup |
+| `-v, --verbose` | off | Enable debug-level logging |
 
 ### Connecting Claude Code
 
-Add repl-mcp to your Claude Code MCP settings. You can configure it at the project level (`.claude/settings.json`) or user level (`~/.claude/settings.json`):
+Add iterm2-mcp to your Claude Code MCP settings (`.claude/settings.json` or `~/.claude/settings.json`):
 
 ```json
 {
   "mcpServers": {
-    "repl-mcp": {
+    "iterm2": {
       "type": "url",
       "url": "http://127.0.0.1:8780/mcp"
     }
@@ -110,12 +136,12 @@ Add repl-mcp to your Claude Code MCP settings. You can configure it at the proje
 }
 ```
 
-With bearer token authentication:
+With authentication:
 
 ```json
 {
   "mcpServers": {
-    "repl-mcp": {
+    "iterm2": {
       "type": "url",
       "url": "http://127.0.0.1:8780/mcp",
       "headers": {
@@ -126,118 +152,187 @@ With bearer token authentication:
 }
 ```
 
-You can also add it via the CLI:
+Or via the CLI:
 
 ```bash
-claude mcp add repl-mcp --transport http http://127.0.0.1:8780/mcp
+claude mcp add iterm2 --transport http http://127.0.0.1:8780/mcp
 ```
 
 ### Connecting Other MCP Clients
 
-The MCP server exposes a Streamable HTTP endpoint at `http://127.0.0.1:8780/mcp` (or your custom host/port). Any MCP-compatible client can connect using the Streamable HTTP transport.
+Any MCP-compatible client can connect using Streamable HTTP transport:
 
-For clients that require manual configuration, the key details are:
-- **Transport**: Streamable HTTP
 - **URL**: `http://<host>:<port>/mcp`
+- **Transport**: Streamable HTTP
 - **Auth** (if enabled): `Authorization: Bearer <token>` header
 
 ## MCP Tools
 
-### `start_program`
+### Tab Management
 
-Start a new interactive program in a PTY.
+#### `create_tab`
+
+Create a new iTerm2 tab, optionally running a command.
 
 ```json
 {
-  "command": "python",
-  "args": ["-i"],
-  "cwd": "/path/to/project",
-  "env": {"PYTHONDONTWRITEBYTECODE": "1"}
+  "command": "python3 -i",
+  "profile": "Default",
+  "window_id": null
 }
 ```
 
-Returns: `{ "id": "bewildered-spectacles", "pid": 1234, "command": "/usr/bin/python" }`
+Returns: `{ "id": "bewildered-spectacles", "session_id": "w0t1p0", "name": "python3 -i" }`
 
-### `send_input`
+#### `close_tab`
 
-Send text to a running program's stdin. A newline is appended if not present.
-
-```json
-{ "id": "<program-id>", "input": "print('hello')" }
-```
-
-### `read_output`
-
-Read new output since the caller's last read. Each agent has an independent cursor.
+Close an iTerm2 tab and stop tracking it.
 
 ```json
-{ "id": "<program-id>", "timeout": 2.0 }
+{ "id": "bewildered-spectacles" }
 ```
 
-Returns: `{ "output": ">>> hello\n", "is_running": true }`
+#### `list_tabs`
 
-The `timeout` parameter (seconds) enables long-polling — the call blocks until output is available or the timeout expires. Use `0` for an instant check.
+List all tracked tabs with their IDs, names, and status. No parameters.
 
-### `send_signal`
+Returns: `[{ "id": "bewildered-spectacles", "session_id": "w0t1p0", "name": "python3 -i", "is_alive": true, "owner_agent": "agent-1", "started_at": "..." }]`
 
-Send a Unix signal to a running program.
+#### `discover_tabs`
+
+Find and start tracking all existing iTerm2 sessions across all windows. Already-tracked sessions are left untouched. No parameters.
+
+#### `adopt_tab`
+
+Claim ownership of an unowned tab (e.g., one discovered from an existing session). Fails if another agent already owns it.
 
 ```json
-{ "id": "<program-id>", "signal": "SIGINT" }
+{ "id": "bewildered-spectacles" }
 ```
 
-### `list_programs`
+### Terminal I/O
 
-List all managed programs (no parameters).
+#### `write_to_terminal`
 
-Returns an array of `{ id, command, pid, is_running, owner_agent, started_at }`.
-
-### `adopt_program`
-
-Adopt an unowned program (e.g. one started by the human via `Ctrl+N` in the TUI). This sets the calling agent as the program's owner.
+Write text to a tab's terminal. By default appends a newline and waits for output to settle before returning.
 
 ```json
-{ "id": "<program-id>" }
+{
+  "id": "bewildered-spectacles",
+  "text": "ls -la",
+  "newline": true,
+  "wait_for_output": true
+}
 ```
 
-Returns: `{ "success": true, "id": "<program-id>", "owner_agent": "agent-1" }`
+Returns: `{ "success": true, "output_lines": 12 }`
 
-Fails if the program is already owned by a different agent.
+The `output_lines` count tells the agent how much output the command produced, so it can decide whether to read it.
 
-### `kill_program`
+#### `read_terminal_output`
 
-Gracefully terminate a program (SIGTERM, then SIGKILL after 2s).
+Read output from a tab. Two modes:
+
+- **Incremental** (default): returns all new output since this agent's last read.
+- **Last N lines**: returns the most recent N lines from the buffer.
 
 ```json
-{ "id": "<program-id>" }
+{ "id": "bewildered-spectacles", "lines": null }
 ```
 
-## Claude Code Skill
+Returns: `{ "output": "total 42\ndrwxr-xr-x ...", "num_lines": 12, "is_alive": true }`
 
-This project includes a built-in [Claude Code skill](https://code.claude.com/docs/en/skills.md) at `.claude/skills/repl/SKILL.md` that teaches AI agents how to use the repl-mcp server effectively.
+#### `send_control_character`
 
-### What the skill provides
+Send a control character to a tab.
 
-When an agent invokes `/repl` (or Claude auto-invokes it based on context), it gets:
+```json
+{ "id": "bewildered-spectacles", "character": "c" }
+```
 
-- **Tool reference** — how to call each MCP tool with examples
-- **Recommended workflow** — the start/read/send/read/kill loop with proper timeouts
-- **Human escalation patterns** — when and how to ask the human operator for help through the TUI (auth prompts, hangs, ambiguous errors, destructive operations)
-- **Best practices** — avoid busy-polling, check `is_running`, clean up programs
+Accepts: single letters (`"c"` for Ctrl+C), `"ctrl-c"` format, or special names (`"esc"`, `"tab"`, `"enter"`).
 
-### Human-in-the-loop
+| Character | Meaning |
+|-----------|---------|
+| `c` | Ctrl+C (interrupt) |
+| `d` | Ctrl+D (EOF) |
+| `z` | Ctrl+Z (suspend) |
+| `l` | Ctrl+L (clear) |
+| `\\` | Ctrl+\\ (quit) |
+| `esc` | Escape key |
 
-The skill explicitly teaches agents to escalate to the human watching the TUI when they get stuck. For example:
+#### `get_screen`
 
-- **Auth prompts**: *"Please enter your credentials in the TUI input bar."*
-- **Program hangs**: *"Could you check the repl-mcp TUI and see if there's a prompt I'm missing?"*
-- **Destructive ops**: *"Please confirm this operation in the TUI before I proceed."*
+Snapshot the current visible screen of a tab, independent of the output buffer.
 
-This keeps the human in control while letting agents handle routine interactions autonomously.
+```json
+{ "id": "bewildered-spectacles" }
+```
 
-### Using in other projects
+Returns: `{ "screen": "user@mac ~ % ls\nfile1.txt  file2.txt\nuser@mac ~ % ", "num_lines": 24, "cursor_x": 15, "cursor_y": 2 }`
 
-Copy the `.claude/skills/repl/` directory into any project where agents should have access to a running repl-mcp server. The skill will appear in Claude Code's skill menu automatically.
+## Limitations
+
+- **macOS only** — iTerm2 is a macOS terminal emulator. This project cannot work on Linux or Windows.
+- **Requires iTerm2 running** — the server connects to a live iTerm2 instance. If iTerm2 isn't running or the Python API isn't enabled, it will fail to start.
+- **Screen-based output, not byte-stream** — output is captured via screen snapshots rather than a raw PTY stream. This means:
+  - Very fast output that scrolls past the screen between snapshots may be partially missed.
+  - Programs that redraw the screen (e.g., `top`, `vim`, `htop`) will produce noisy diffs.
+  - The output buffer contains logical lines, not raw terminal escape sequences.
+- **No scrollback capture** — only the visible screen area is diffed. Lines that scroll into iTerm2's scrollback buffer between screen updates are captured via the diff, but extremely rapid output may outpace the streamer.
+- **Single iTerm2 instance** — connects to whatever iTerm2 instance is running. Cannot target a specific instance if multiple are running (rare edge case).
+- **Tab close is forceful** — `close_tab` sends a force-close to the iTerm2 session. Running processes in that tab will be terminated.
+- **No file transfer** — the server provides terminal I/O, not file system access. Use other MCP tools for file operations.
+
+## Security Decisions
+
+### Localhost-only by default
+
+The server binds to `127.0.0.1` by default, so it is not accessible from the network. Binding to `0.0.0.0` is supported but **not recommended** — anyone who can reach the port can control your terminal.
+
+### Optional bearer token authentication
+
+When `--token` is set, every MCP request must include an `Authorization: Bearer <token>` header. The token is compared using `secrets.compare_digest` to prevent timing attacks. Without `--token`, the server is unauthenticated (acceptable for localhost-only use).
+
+### No program allowlist
+
+Unlike the PTY-based predecessor, this server does not restrict which commands can be run — it sends text to iTerm2 tabs, which are full shell sessions. The agent can type anything the human could type. **The security boundary is iTerm2 itself and the user's shell permissions.**
+
+### No environment variable injection
+
+The server does not pass environment variables to iTerm2 sessions. Sessions inherit iTerm2's environment, which the user controls via their shell profile and iTerm2 preferences.
+
+### Per-agent isolation
+
+Each MCP session gets a stable agent label (`agent-1`, `agent-2`, etc.) with independent read cursors. Agents can only adopt unowned tabs — they cannot take ownership of another agent's tab. However, any agent can read from or write to any tracked tab (ownership is for bookkeeping, not access control).
+
+### No automatic tab cleanup
+
+When the server shuts down, it cancels its output monitors but **does not close iTerm2 tabs**. This is intentional — the user's terminal sessions should not be destroyed just because the MCP server stopped.
+
+## Architecture
+
+```
+src/repl_mcp/
+├── __init__.py      # Package version
+├── __main__.py      # Headless CLI entry point
+├── auth.py          # Bearer token middleware (Starlette)
+├── manager.py       # ITermManager: connection, tabs, output monitoring
+├── models.py        # Tab dataclass
+└── server.py        # ITermMCPServer: FastMCP tool registration, ASGI app
+```
+
+### Data Flow
+
+1. Agent calls `write_to_terminal(id="bewildered-spectacles", text="ls")`
+2. `server.py` resolves the agent label, delegates to `manager.py`
+3. `manager.py` looks up the iTerm2 session ID, calls `session.async_send_text("ls\n")`
+4. iTerm2 executes the command in the tab — the user sees it happen in real time
+5. `ScreenStreamer` fires in the background monitor task
+6. Monitor diffs the screen, appends new lines to `tab.output_buffer`
+7. `write_to_terminal` waits for output to settle, returns `{"output_lines": 12}`
+8. Agent calls `read_terminal_output(id="bewildered-spectacles")` to get the actual output
+9. Manager returns buffered lines since the agent's last read cursor position
 
 ## Development
 
@@ -246,9 +341,6 @@ Copy the `.claude/skills/repl/` directory into any project where agents should h
 pip install -e ".[dev]"
 
 # Run tests
-pytest
-
-# Run with verbose output
 pytest -v
 
 # Format code
@@ -256,27 +348,6 @@ black src/ tests/
 
 # Lint
 pylint src/repl_mcp/
-```
-
-## Project Structure
-
-```
-.claude/skills/repl/
-└── SKILL.md         # Agent skill: how to use the repl-mcp server
-
-src/repl_mcp/
-├── __init__.py      # Package version
-├── __main__.py      # CLI entry point, wires TUI + MCP server
-├── app.py           # Textual TUI application
-├── auth.py          # Bearer token middleware
-├── manager.py       # Program manager (PTY lifecycle, I/O, cursors)
-├── models.py        # Program and Agent dataclasses
-└── server.py        # MCP server (tool registration, HTTP transport)
-
-tests/
-├── test_allowlist.py
-├── test_manager.py
-└── test_server.py
 ```
 
 ## License

@@ -1,3 +1,3 @@
-"""repl-mcp: A TUI application and MCP server for managing interactive REPL programs."""
+"""iterm2-mcp: MCP server for controlling iTerm2 via its Python API."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

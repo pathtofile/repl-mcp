@@ -1,512 +1,560 @@
-"""REPL process manager."""
+"""iTerm2 session manager — core logic for controlling iTerm2 tabs/panes."""
 
 import asyncio
-import errno
-import fcntl
+import hashlib
 import logging
-import os
-import pty
-import signal
-import shutil
-import subprocess
-import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from .models import Program
+import iterm2
+
+from .models import Tab
 
 logger = logging.getLogger(__name__)
 
-# Environment variables that must not be overridden by callers
-_BLOCKED_ENV_VARS = frozenset(
-    {
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "DYLD_FRAMEWORK_PATH",
-    }
-)
-
-# Constants for tuning
-PTY_READ_SIZE = 4096
-EAGAIN_RETRY_DELAY = 0.05
-KILL_POLL_INTERVAL = 0.1
-KILL_POLL_ITERATIONS = 20
+# How long to wait for output after writing to a terminal
+OUTPUT_SETTLE_DELAY = 0.3
+# Max time to wait for output to stabilize (stop changing)
+OUTPUT_SETTLE_TIMEOUT = 5.0
+# Polling interval when waiting for output to settle
+OUTPUT_POLL_INTERVAL = 0.15
+# Default scrollback buffer limit (lines)
+DEFAULT_SCROLLBACK_LIMIT = 10000
 
 
-class ProgramManager:
-    """Manages interactive programs running in PTYs."""
+class ITermManager:
+    """Manages iTerm2 sessions via the Python API.
+
+    Connects to a running iTerm2 instance over its Unix socket and provides
+    methods to create/close tabs, send input, read output, and send control
+    characters.  Supports multiple concurrent tabs and per-agent read cursors.
+    """
 
     def __init__(self) -> None:
-        self._programs: dict[str, Program] = {}
+        self._connection: iterm2.Connection | None = None
+        self._app: iterm2.App | None = None
+        self._tabs: dict[str, Tab] = {}  # our_id -> Tab
+        self._session_to_tab: dict[str, str] = {}  # iterm2 session_id -> our_id
         self._output_events: dict[str, asyncio.Event] = {}
-        self._read_tasks: dict[str, asyncio.Task] = {}
-        self._allowlist: set[str] | None = None  # None means allow all
-        self.scrollback_limit: int = 10000
-        self.on_output: Callable[[str, str, str], None] | None = None
-        self.on_program_started: Callable[[Program], None] | None = None
-        self.on_program_exited: Callable[[Program], None] | None = None
+        self._monitor_tasks: dict[str, asyncio.Task] = {}
+        self.scrollback_limit: int = DEFAULT_SCROLLBACK_LIMIT
+
+        # Callbacks (optional, for extensibility)
+        self.on_output: Callable[[str, str], None] | None = None
+        self.on_tab_created: Callable[[Tab], None] | None = None
+        self.on_tab_closed: Callable[[Tab], None] | None = None
 
     # ------------------------------------------------------------------ #
-    #  Allowlist
+    #  Connection lifecycle
     # ------------------------------------------------------------------ #
 
-    def set_allowlist(self, programs: list[str]) -> None:
-        """Set the allowlist of permitted programs (resolved to canonical paths)."""
-        resolved: set[str] = set()
-        for name in programs:
-            path = shutil.which(name)
-            if path is not None:
-                resolved.add(os.path.realpath(path))
-            else:
-                # Allow literal paths that exist
-                real = os.path.realpath(name)
-                if os.path.isfile(real):
-                    resolved.add(real)
-                else:
-                    logger.warning("Allowlist entry '%s' could not be resolved; skipping", name)
-        self._allowlist = resolved
-
-    def _check_allowlist(self, resolved_path: str) -> None:
-        """Raise ValueError if the resolved path is not in the allowlist."""
-        if self._allowlist is None:
-            return
-        if resolved_path not in self._allowlist:
-            logger.warning(
-                "Blocked program '%s' (allowlist: %s)", resolved_path, sorted(self._allowlist)
-            )
-            raise ValueError(f"Program '{resolved_path}' is not in the allowlist.")
-
-    # ------------------------------------------------------------------ #
-    #  Core operations
-    # ------------------------------------------------------------------ #
-
-    async def start_program(
-        self,
-        command: str,
-        args: list[str] | None = None,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
-        owner_agent: str = "",
-    ) -> dict:
-        """Start a new interactive program in a PTY.
-
-        Returns dict with id, pid, and command.
+    async def connect(self) -> None:
+        """Connect to iTerm2.  Requires iTerm2 to be running with the
+        Python API enabled (Preferences > General > Magic > Enable Python API).
         """
-        args = args or []
+        self._connection = await iterm2.Connection.async_create()
+        self._app = await iterm2.async_get_app(self._connection)
+        logger.info("Connected to iTerm2")
 
-        # Resolve command to a real path
-        which_path = shutil.which(command)
-        if which_path is None:
-            raise FileNotFoundError(f"Command not found: {command}")
-        resolved_command = os.path.realpath(which_path)
-
-        # Check allowlist
-        self._check_allowlist(resolved_command)
-
-        # Build environment, blocking dangerous overrides from callers
-        proc_env = os.environ.copy()
-        if env:
-            for key, value in env.items():
-                if key in _BLOCKED_ENV_VARS:
-                    logger.warning("Blocked dangerous env var override: %s", key)
-                    continue
-                proc_env[key] = value
-
-        # Create PTY pair
-        master_fd, slave_fd = pty.openpty()
-
-        try:
-            process = subprocess.Popen(
-                [resolved_command] + args,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                start_new_session=True,
-                cwd=cwd,
-                env=proc_env,
-            )
-        except Exception:
-            os.close(master_fd)
-            os.close(slave_fd)
-            raise
-
-        # Close slave fd in parent — the child owns it now
-        os.close(slave_fd)
-
-        # Set master fd to non-blocking
-        flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-        fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-        prog = Program(
-            command=resolved_command,
-            args=args,
-            pid=process.pid,
-            pty_fd=master_fd,
-            is_running=True,
-            owner_agent=owner_agent,
-            process=process,
-            cwd=cwd or os.getcwd(),
-            env=env or {},
-        )
-
-        # Ensure the generated name is unique among existing programs
-        while prog.id in self._programs:
-            from .models import _generate_unique_name
-
-            prog.id = _generate_unique_name()
-
-        self._programs[prog.id] = prog
-        self._output_events[prog.id] = asyncio.Event()
-
-        # Start async read loop
-        task = asyncio.create_task(self._read_loop(prog))
-        self._read_tasks[prog.id] = task
-
-        logger.info("Started program %s (pid=%d, cmd=%s)", prog.id, prog.pid, resolved_command)
-
-        # Notify TUI that a new program started
-        if self.on_program_started is not None:
-            try:
-                self.on_program_started(prog)
-            except Exception:
-                logger.exception("on_program_started callback error")
-
-        return {"id": prog.id, "pid": prog.pid, "command": resolved_command}
-
-    async def send_input(
-        self,
-        program_id: str,
-        text: str,
-        source: str = "ai",
-        agent_id: str = "",
-    ) -> dict:
-        """Send input text to a running program's PTY.
-
-        Returns dict with success status.
-        """
-        prog = self._get_program(program_id)
-
-        if not prog.is_running:
-            raise RuntimeError(f"Program {program_id} is not running")
-
-        # Append newline if not present
-        if not text.endswith("\n"):
-            text += "\n"
-
-        # Write to PTY
-        try:
-            os.write(prog.pty_fd, text.encode("utf-8"))
-        except OSError as exc:
-            raise RuntimeError(f"Failed to write to PTY: {exc}") from exc
-
-        # Track input in output buffer with attribution marker for TUI coloring
-        marker = self._make_input_marker(text, source, agent_id)
-        prog.output_buffer.append(marker)
-        self._enforce_scrollback(prog)
-
-        prog.last_io_time = datetime.now(timezone.utc)
-
-        # Notify waiters
-        self._wake_event(program_id)
-
-        # Notify TUI callback
-        if self.on_output is not None:
-            try:
-                self.on_output(program_id, text, source)
-            except Exception:
-                logger.exception("on_output callback error")
-
-        return {"success": True}
-
-    async def send_signal(self, program_id: str, signal_name: str) -> dict:
-        """Send a signal to a running program.
-
-        signal_name should be like 'SIGINT', 'SIGTERM', etc.
-        Returns dict with success status.
-        """
-        prog = self._get_program(program_id)
-
-        # Parse signal name
-        sig_name = signal_name.upper()
-        if not sig_name.startswith("SIG"):
-            sig_name = "SIG" + sig_name
-        try:
-            sig = signal.Signals[sig_name]
-        except KeyError:
-            raise ValueError(f"Unknown signal: {signal_name}") from None
-
-        try:
-            os.kill(prog.pid, sig)
-        except ProcessLookupError:
-            prog.is_running = False
-            raise RuntimeError(f"Process {prog.pid} no longer exists") from None
-
-        logger.info("Sent %s to program %s (pid=%d)", sig_name, program_id, prog.pid)
-        return {"success": True}
-
-    async def read_output(
-        self,
-        program_id: str,
-        agent_id: str = "",
-        timeout: float = 0,
-    ) -> dict:
-        """Read new output from a program since this agent's last read.
-
-        Returns dict with output text and is_running status.
-        """
-        prog = self._get_program(program_id)
-
-        cursor = prog.read_cursors.get(agent_id, 0)
-
-        # If no new output and timeout > 0, wait
-        if cursor >= len(prog.output_buffer) and timeout > 0 and prog.is_running:
-            event = self._output_events.get(program_id)
-            if event is not None:
-                try:
-                    await asyncio.wait_for(event.wait(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    pass
-
-        # Collect new output
-        buf = prog.output_buffer
-        new_data = buf[cursor:]
-        prog.read_cursors[agent_id] = len(buf)
-
-        output_text = "".join(new_data)
-
-        return {"output": output_text, "is_running": prog.is_running}
-
-    async def kill_program(self, program_id: str) -> dict:
-        """Kill a program: SIGTERM, wait 2s, then SIGKILL if needed.
-
-        Returns dict with success status.
-        """
-        prog = self._get_program(program_id)
-
-        if prog.is_running and prog.process is not None:
-            # Send SIGTERM
-            try:
-                os.kill(prog.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
-            # Wait up to 2 seconds for graceful exit
-            for _ in range(KILL_POLL_ITERATIONS):
-                if prog.process.poll() is not None:
-                    break
-                await asyncio.sleep(KILL_POLL_INTERVAL)
-
-            # Force kill if still running
-            if prog.process.poll() is None:
-                try:
-                    os.kill(prog.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                # Brief wait for SIGKILL to take effect
-                await asyncio.sleep(KILL_POLL_INTERVAL)
-
-        prog.is_running = False
-
-        # Clean up PTY fd
-        if prog.pty_fd >= 0:
-            try:
-                os.close(prog.pty_fd)
-            except OSError:
-                pass
-            prog.pty_fd = -1
-
-        # Cancel read task
-        task = self._read_tasks.pop(program_id, None)
-        if task is not None and not task.done():
+    async def disconnect(self) -> None:
+        """Cancel all monitors and disconnect."""
+        for task in self._monitor_tasks.values():
             task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-        logger.info("Killed program %s (pid=%d)", program_id, prog.pid)
-        return {"success": True}
-
-    async def adopt_program(self, program_id: str, agent_id: str) -> dict:
-        """Adopt an unowned program (or transfer ownership).
-
-        Returns dict with success status and the program id.
-        """
-        prog = self._get_program(program_id)
-        if prog.owner_agent and prog.owner_agent != agent_id:
-            raise RuntimeError(f"Program {program_id} is already owned by '{prog.owner_agent}'")
-        prog.owner_agent = agent_id
-        logger.info("Agent %s adopted program %s", agent_id, program_id)
-
-        # Notify TUI so it can update the tab label
-        if self.on_program_started is not None:
-            try:
-                self.on_program_started(prog)
-            except Exception:
-                logger.exception("on_program_started callback error (adopt)")
-
-        return {"success": True, "id": prog.id, "owner_agent": agent_id}
-
-    def list_programs(self) -> list[dict]:
-        """Return a list of all managed programs as dicts."""
-        return [prog.to_list_dict() for prog in self._programs.values()]
+        self._monitor_tasks.clear()
+        self._connection = None
+        self._app = None
+        logger.info("Disconnected from iTerm2")
 
     @property
-    def programs(self) -> dict[str, Program]:
-        """Public read-only access to managed programs."""
-        return self._programs
+    def connected(self) -> bool:
+        return self._connection is not None and self._app is not None
 
-    async def shutdown(self) -> None:
-        """Kill all running programs and clean up."""
-        for prog_id in list(self._programs.keys()):
-            try:
-                await self.kill_program(prog_id)
-            except Exception:
-                logger.exception("Error shutting down program %s", prog_id)
+    def _ensure_connected(self) -> None:
+        if not self.connected:
+            raise RuntimeError("Not connected to iTerm2. Call connect() first.")
 
-    def kill_all_sync(self) -> None:
-        """Synchronously kill all running programs (for use during interpreter shutdown).
-
-        Sends SIGTERM then SIGKILL to each running process and closes PTY fds.
-        Does not await anything — safe to call when no event loop is available.
-        """
-        import time as _time
-
-        for prog in self._programs.values():
-            if not prog.is_running or prog.process is None:
-                continue
-            if prog.process.poll() is not None:
-                continue
-            try:
-                os.kill(prog.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                continue
-
-        # Brief wait for graceful exits
-        _time.sleep(0.5)
-
-        for prog in self._programs.values():
-            if prog.process is None:
-                continue
-            if prog.process.poll() is None:
-                try:
-                    os.kill(prog.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            # Clean up PTY fd
-            if prog.pty_fd >= 0:
-                try:
-                    os.close(prog.pty_fd)
-                except OSError:
-                    pass
-                prog.pty_fd = -1
-            prog.is_running = False
+    def _get_iterm_session(self, session_id: str) -> iterm2.Session:
+        """Look up an iTerm2 Session object by its ID."""
+        self._ensure_connected()
+        session = self._app.get_session_by_id(session_id)
+        if session is None:
+            raise KeyError(f"iTerm2 session '{session_id}' no longer exists")
+        return session
 
     # ------------------------------------------------------------------ #
-    #  Internal helpers
+    #  Tab lookup
     # ------------------------------------------------------------------ #
 
-    def _get_program(self, program_id: str) -> Program:
-        """Look up a program by ID or raise KeyError."""
+    def _get_tab(self, tab_id: str) -> Tab:
+        """Get a tracked Tab by our human-readable ID."""
         try:
-            return self._programs[program_id]
+            return self._tabs[tab_id]
         except KeyError:
-            raise KeyError(f"No program with id '{program_id}'") from None
+            raise KeyError(f"No tracked tab with id '{tab_id}'") from None
 
-    def _enforce_scrollback(self, prog: Program) -> None:
-        """Trim output buffer to scrollback_limit and adjust cursors."""
-        if len(prog.output_buffer) > self.scrollback_limit:
-            excess = len(prog.output_buffer) - self.scrollback_limit
-            del prog.output_buffer[:excess]
-            # Adjust read cursors
-            for agent_id in prog.read_cursors:
-                prog.read_cursors[agent_id] = max(0, prog.read_cursors[agent_id] - excess)
+    def _ensure_unique_id(self, tab: Tab) -> None:
+        """Ensure the tab's generated name doesn't collide."""
+        while tab.id in self._tabs:
+            from .models import _generate_unique_name
 
-    @staticmethod
-    def _make_input_marker(text: str, source: str, agent_id: str) -> str:
-        """Build an OSC-8 hyperlink-encoded attribution marker for input lines.
+            tab.id = _generate_unique_name()
 
-        Uses the OSC-8 terminal hyperlink escape sequence to embed metadata
-        (source and agent_id) that the TUI can parse for coloring, without
-        affecting plain-text display in terminals that support OSC-8.
+    # ------------------------------------------------------------------ #
+    #  Tab management
+    # ------------------------------------------------------------------ #
+
+    async def create_tab(
+        self,
+        command: str | None = None,
+        profile: str | None = None,
+        window_id: str | None = None,
+        owner_agent: str = "",
+    ) -> dict:
+        """Create a new iTerm2 tab and start tracking it.
+
+        Args:
+            command: Optional command to run immediately in the new tab.
+            profile: iTerm2 profile name to use (default profile if None).
+            window_id: Create tab in this window (current window if None).
+            owner_agent: Agent label that owns this tab.
+
+        Returns:
+            Dict with id, session_id, and name.
         """
-        return f"\x1b]8;;input:{source}:{agent_id}\x1b\\{text}\x1b]8;;\x1b\\"
+        self._ensure_connected()
 
-    def _wake_event(self, program_id: str) -> None:
-        """Notify any asyncio waiters that new output is available."""
-        event = self._output_events.get(program_id)
-        if event is not None:
-            event.set()
-            event.clear()
+        # Find the target window
+        window = None
+        if window_id:
+            for w in self._app.windows:
+                if w.window_id == window_id:
+                    window = w
+                    break
+            if window is None:
+                raise KeyError(f"No iTerm2 window with id '{window_id}'")
+        else:
+            window = self._app.current_terminal_window
+            if window is None:
+                raise RuntimeError("No iTerm2 window available. Open iTerm2 first.")
 
-    def _blocking_read(self, fd: int) -> bytes:
-        """Blocking read from a (possibly non-blocking) PTY fd.
+        # Create the tab
+        tab_obj = await window.async_create_tab(profile=profile)
+        session = tab_obj.current_session
 
-        Retries on EAGAIN/EWOULDBLOCK with a short sleep so the executor
-        thread does not spin-wait, and only raises on real errors (EIO, EBADF)
-        which indicate the PTY has been closed.
-        """
-        while True:
+        # Build our Tab model
+        tab = Tab(
+            session_id=session.session_id,
+            tab_id=tab_obj.tab_id,
+            window_id=window.window_id,
+            name=command or session.name or "shell",
+            is_alive=True,
+            owner_agent=owner_agent,
+        )
+        self._ensure_unique_id(tab)
+
+        self._tabs[tab.id] = tab
+        self._session_to_tab[session.session_id] = tab.id
+        self._output_events[tab.id] = asyncio.Event()
+
+        # Start output monitor
+        self._monitor_tasks[tab.id] = asyncio.create_task(self._output_monitor(tab))
+
+        logger.info("Created tab %s (session=%s)", tab.id, session.session_id)
+
+        # Run initial command if provided
+        if command:
+            await session.async_send_text(command + "\n")
+
+        if self.on_tab_created:
             try:
-                return os.read(fd, PTY_READ_SIZE)
-            except OSError as exc:
-                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                    time.sleep(EAGAIN_RETRY_DELAY)
-                    continue
-                raise
+                self.on_tab_created(tab)
+            except Exception:
+                logger.exception("on_tab_created callback error")
 
-    async def _read_loop(self, prog: Program) -> None:
-        """Async task that reads from the PTY fd and appends to the output buffer."""
-        loop = asyncio.get_running_loop()
-        fd = prog.pty_fd
+        return {"id": tab.id, "session_id": session.session_id, "name": tab.name}
+
+    async def close_tab(self, tab_id: str) -> dict:
+        """Close an iTerm2 tab and stop tracking it."""
+        tab = self._get_tab(tab_id)
 
         try:
-            while True:
-                try:
-                    data = await loop.run_in_executor(None, self._blocking_read, fd)
-                except OSError:
-                    # PTY closed (EIO / EBADF)
-                    break
+            session = self._get_iterm_session(tab.session_id)
+            await session.async_close(force=True)
+        except (KeyError, iterm2.RPCException):
+            logger.warning("Session %s already closed", tab.session_id)
 
-                if not data:
-                    # EOF
-                    break
+        return self._cleanup_tab(tab_id)
 
-                text = data.decode("utf-8", errors="replace")
-                prog.output_buffer.append(text)
-                self._enforce_scrollback(prog)
-                prog.last_io_time = datetime.now(timezone.utc)
+    def _cleanup_tab(self, tab_id: str) -> dict:
+        """Remove a tab from tracking."""
+        tab = self._tabs.pop(tab_id, None)
+        if tab is None:
+            return {"success": True}
 
-                # Notify waiters
-                self._wake_event(prog.id)
+        tab.is_alive = False
+        self._session_to_tab.pop(tab.session_id, None)
+        self._output_events.pop(tab_id, None)
 
-                # Notify TUI callback
-                if self.on_output is not None:
-                    try:
-                        self.on_output(prog.id, text, "program")
-                    except Exception:
-                        logger.exception("on_output callback error")
+        task = self._monitor_tasks.pop(tab_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        if self.on_tab_closed:
+            try:
+                self.on_tab_closed(tab)
+            except Exception:
+                logger.exception("on_tab_closed callback error")
+
+        logger.info("Closed tab %s", tab_id)
+        return {"success": True}
+
+    async def list_tabs(self) -> list[dict]:
+        """List all tracked tabs."""
+        # Refresh aliveness from iTerm2
+        for tab in list(self._tabs.values()):
+            try:
+                self._get_iterm_session(tab.session_id)
+            except KeyError:
+                tab.is_alive = False
+        return [tab.to_dict() for tab in self._tabs.values()]
+
+    async def discover_tabs(self, owner_agent: str = "") -> list[dict]:
+        """Discover all existing iTerm2 sessions and start tracking untracked ones.
+
+        Returns list of all tracked tabs (newly discovered + already tracked).
+        """
+        self._ensure_connected()
+        newly_tracked = []
+
+        for window in self._app.windows:
+            for itab in window.tabs:
+                for session in itab.sessions:
+                    if session.session_id not in self._session_to_tab:
+                        tab = Tab(
+                            session_id=session.session_id,
+                            tab_id=itab.tab_id,
+                            window_id=window.window_id,
+                            name=session.name or "shell",
+                            is_alive=True,
+                            owner_agent=owner_agent,
+                        )
+                        self._ensure_unique_id(tab)
+                        self._tabs[tab.id] = tab
+                        self._session_to_tab[session.session_id] = tab.id
+                        self._output_events[tab.id] = asyncio.Event()
+                        self._monitor_tasks[tab.id] = asyncio.create_task(
+                            self._output_monitor(tab)
+                        )
+                        newly_tracked.append(tab)
+
+        return [tab.to_dict() for tab in self._tabs.values()]
+
+    async def adopt_tab(self, tab_id: str, agent_id: str) -> dict:
+        """Adopt an unowned tab (or one you already own)."""
+        tab = self._get_tab(tab_id)
+        if tab.owner_agent and tab.owner_agent != agent_id:
+            raise RuntimeError(f"Tab {tab_id} is already owned by '{tab.owner_agent}'")
+        tab.owner_agent = agent_id
+        logger.info("Agent %s adopted tab %s", agent_id, tab_id)
+        return {"success": True, "id": tab.id, "owner_agent": agent_id}
+
+    # ------------------------------------------------------------------ #
+    #  Terminal I/O
+    # ------------------------------------------------------------------ #
+
+    async def write_to_terminal(
+        self,
+        tab_id: str,
+        text: str,
+        newline: bool = True,
+        wait_for_output: bool = True,
+        agent_id: str = "",
+    ) -> dict:
+        """Write text to an iTerm2 session (typically to run a command).
+
+        Args:
+            tab_id: Our tab ID.
+            text: Text to send (a command, input, etc.).
+            newline: Whether to append a newline (default True).
+            wait_for_output: Wait briefly for output to settle (default True).
+            agent_id: Agent making the write (for cursor tracking).
+
+        Returns:
+            Dict with success status and number of new output lines produced.
+        """
+        tab = self._get_tab(tab_id)
+        session = self._get_iterm_session(tab.session_id)
+
+        # Record buffer position before write
+        pre_write_len = len(tab.output_buffer)
+
+        # Send text
+        payload = text + "\n" if newline and not text.endswith("\n") else text
+        await session.async_send_text(payload)
+
+        tab.last_activity = datetime.now(timezone.utc)
+
+        if wait_for_output:
+            # Wait for output to settle: keep polling until no new output
+            # arrives for OUTPUT_SETTLE_DELAY, up to OUTPUT_SETTLE_TIMEOUT
+            elapsed = 0.0
+            last_len = len(tab.output_buffer)
+            # Initial wait for first output to appear
+            await asyncio.sleep(OUTPUT_SETTLE_DELAY)
+            while elapsed < OUTPUT_SETTLE_TIMEOUT:
+                current_len = len(tab.output_buffer)
+                if current_len > last_len:
+                    # New output arrived, reset settle timer
+                    last_len = current_len
+                    elapsed = 0.0
+                else:
+                    elapsed += OUTPUT_POLL_INTERVAL
+                await asyncio.sleep(OUTPUT_POLL_INTERVAL)
+
+        new_lines = len(tab.output_buffer) - pre_write_len
+
+        return {"success": True, "output_lines": new_lines}
+
+    async def read_terminal_output(
+        self,
+        tab_id: str,
+        lines: int | None = None,
+        agent_id: str = "",
+    ) -> dict:
+        """Read lines from a tab's output buffer.
+
+        If `lines` is None, returns all new output since this agent's last read.
+        If `lines` is set, returns the last N lines from the buffer.
+
+        Args:
+            tab_id: Our tab ID.
+            lines: Number of lines to read (None = all new since last read).
+            agent_id: Agent making the read.
+
+        Returns:
+            Dict with output text, line count, and is_alive status.
+        """
+        tab = self._get_tab(tab_id)
+
+        if lines is not None:
+            # Return the last N lines
+            start = max(0, len(tab.output_buffer) - lines)
+            result_lines = tab.output_buffer[start:]
+            # Update cursor to current position
+            tab.read_cursors[agent_id] = len(tab.output_buffer)
+        else:
+            # Return everything since last read
+            cursor = tab.read_cursors.get(agent_id, 0)
+            result_lines = tab.output_buffer[cursor:]
+            tab.read_cursors[agent_id] = len(tab.output_buffer)
+
+        output_text = "\n".join(result_lines)
+        return {
+            "output": output_text,
+            "num_lines": len(result_lines),
+            "is_alive": tab.is_alive,
+        }
+
+    async def send_control_character(self, tab_id: str, character: str) -> dict:
+        """Send a control character to an iTerm2 session.
+
+        Args:
+            tab_id: Our tab ID.
+            character: Control character name like "c" for Ctrl+C, "d" for Ctrl+D,
+                       "z" for Ctrl+Z, "l" for Ctrl+L, "\\" for Ctrl+\\, etc.
+                       Can also be a raw control character or "ctrl-X" format.
+
+        Returns:
+            Dict with success status.
+        """
+        tab = self._get_tab(tab_id)
+        session = self._get_iterm_session(tab.session_id)
+
+        ctrl_char = self._resolve_control_character(character)
+        await session.async_send_text(ctrl_char)
+
+        tab.last_activity = datetime.now(timezone.utc)
+        logger.info("Sent control character '%s' to tab %s", character, tab_id)
+        return {"success": True}
+
+    async def get_screen(self, tab_id: str) -> dict:
+        """Get the current visible screen contents of a tab.
+
+        Returns a snapshot of what's currently visible in the terminal,
+        independent of the output buffer / read cursors.
+        """
+        tab = self._get_tab(tab_id)
+        session = self._get_iterm_session(tab.session_id)
+
+        contents = await session.async_get_screen_contents()
+        screen_lines = []
+        for i in range(contents.number_of_lines):
+            line = contents.line(i)
+            screen_lines.append(line.string)
+
+        return {
+            "screen": "\n".join(screen_lines),
+            "num_lines": contents.number_of_lines,
+            "cursor_x": contents.cursor_coord.x,
+            "cursor_y": contents.cursor_coord.y,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  Output monitoring
+    # ------------------------------------------------------------------ #
+
+    async def _output_monitor(self, tab: Tab) -> None:
+        """Background task that monitors an iTerm2 session for screen changes
+        and accumulates new output into the tab's buffer.
+
+        Uses ScreenStreamer for change notifications, then diffs consecutive
+        screen snapshots to extract new lines.
+        """
+        try:
+            async with iterm2.ScreenStreamer(
+                self._connection, tab.session_id
+            ) as streamer:
+                while True:
+                    contents = await streamer.async_get()
+                    current_lines = []
+                    for i in range(contents.number_of_lines):
+                        current_lines.append(contents.line(i).string)
+
+                    # Diff against previous screen to find new output
+                    new_lines = self._diff_screen(tab.last_screen_lines, current_lines)
+
+                    if new_lines:
+                        tab.output_buffer.extend(new_lines)
+                        self._enforce_scrollback(tab)
+                        tab.last_activity = datetime.now(timezone.utc)
+
+                        # Wake any read waiters
+                        event = self._output_events.get(tab.id)
+                        if event:
+                            event.set()
+                            event.clear()
+
+                        if self.on_output:
+                            try:
+                                self.on_output(tab.id, "\n".join(new_lines))
+                            except Exception:
+                                logger.exception("on_output callback error")
+
+                    tab.last_screen_lines = current_lines
 
         except asyncio.CancelledError:
             return
-        finally:
-            # Mark program as not running
-            if prog.process is not None:
-                prog.process.poll()
-            prog.is_running = False
+        except iterm2.RPCException:
+            logger.info("Session %s disconnected, stopping monitor", tab.session_id)
+            tab.is_alive = False
+        except Exception:
+            logger.exception("Output monitor error for tab %s", tab.id)
+            tab.is_alive = False
 
-            # Wake any waiters so they see is_running=False
-            event = self._output_events.get(prog.id)
-            if event is not None:
-                event.set()
+    @staticmethod
+    def _diff_screen(prev_lines: list[str], curr_lines: list[str]) -> list[str]:
+        """Extract new lines by comparing consecutive screen snapshots.
 
-            # Notify TUI that program exited
-            if self.on_program_exited is not None:
-                try:
-                    self.on_program_exited(prog)
-                except Exception:
-                    logger.exception("on_program_exited callback error")
+        Finds the overlap between the end of the previous screen and the
+        start of the current screen (indicating scroll), then returns the
+        lines that are genuinely new.
 
-            logger.info("Read loop ended for program %s (pid=%d)", prog.id, prog.pid)
+        If no overlap is found and the screen changed, returns all current
+        lines (fresh screen / large jump).
+        """
+        if not prev_lines:
+            # First snapshot — treat all non-empty lines as new
+            return [line for line in curr_lines if line.strip()]
+
+        if prev_lines == curr_lines:
+            return []
+
+        # Try to find overlap: the tail of prev matching the head of curr.
+        # This detects how many lines scrolled off.
+        best_overlap = 0
+        max_check = min(len(prev_lines), len(curr_lines))
+        for k in range(1, max_check + 1):
+            if prev_lines[-k:] == curr_lines[:k]:
+                best_overlap = k
+
+        if best_overlap > 0:
+            # New lines are everything after the overlapping prefix
+            new = curr_lines[best_overlap:]
+            return [line for line in new if line.strip()]
+
+        # No overlap found — the screen jumped. Return lines that differ
+        # from the previous screen (conservative: only lines that are new
+        # and non-empty).
+        prev_set = set(prev_lines)
+        new = [line for line in curr_lines if line.strip() and line not in prev_set]
+        return new
+
+    def _enforce_scrollback(self, tab: Tab) -> None:
+        """Trim output buffer and adjust read cursors."""
+        if len(tab.output_buffer) > self.scrollback_limit:
+            excess = len(tab.output_buffer) - self.scrollback_limit
+            del tab.output_buffer[:excess]
+            for agent_id in tab.read_cursors:
+                tab.read_cursors[agent_id] = max(0, tab.read_cursors[agent_id] - excess)
+
+    # ------------------------------------------------------------------ #
+    #  Helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _resolve_control_character(char: str) -> str:
+        """Convert a control character name to its actual character.
+
+        Accepts formats:
+          - Single letter: "c" -> Ctrl+C (\\x03)
+          - "ctrl-c" or "ctrl+c" format
+          - Raw control character passed through
+          - Special names: "esc", "tab", "enter", "return"
+        """
+        # Normalize
+        normalized = char.strip().lower()
+
+        # Handle "ctrl-X" / "ctrl+X" format
+        for prefix in ("ctrl-", "ctrl+", "ctrl "):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+
+        # Special names
+        specials = {
+            "esc": "\x1b",
+            "escape": "\x1b",
+            "tab": "\t",
+            "enter": "\r",
+            "return": "\r",
+            "backspace": "\x7f",
+            "delete": "\x7f",
+        }
+        if normalized in specials:
+            return specials[normalized]
+
+        # Single letter -> control character (a=0x01, c=0x03, d=0x04, etc.)
+        if len(normalized) == 1 and normalized.isalpha():
+            return chr(ord(normalized) - ord("a") + 1)
+
+        # Backslash -> Ctrl+\ (0x1c)
+        if normalized == "\\":
+            return "\x1c"
+
+        # If it's already a raw control character, pass through
+        if len(char) == 1 and ord(char) < 32:
+            return char
+
+        raise ValueError(
+            f"Unknown control character: '{char}'. "
+            "Use a letter (e.g. 'c' for Ctrl+C), 'ctrl-c' format, "
+            "or a special name (esc, tab, enter)."
+        )
+
+    async def shutdown(self) -> None:
+        """Cancel all monitors. Does NOT close iTerm2 tabs."""
+        for task in self._monitor_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._monitor_tasks.clear()
+        logger.info("Shutdown complete — monitors cancelled")
