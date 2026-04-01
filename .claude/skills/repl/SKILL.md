@@ -1,151 +1,187 @@
 ---
 name: repl
-description: Use this skill when you need to run interactive programs (Python REPL, shells, gdb, etc.) via the repl-mcp server. Provides guidance on starting programs, sending input, reading output, and asking the human operator for help when stuck.
+description: Use this skill when you need to control iTerm2 terminals via the iterm2-mcp server. Provides guidance on creating tabs, running commands, reading output, sending control characters, and asking the human operator for help when stuck.
 argument-hint: "[task description]"
 ---
 
-# Using the repl-mcp Server
+# Using the iterm2-mcp Server
 
-You have access to a repl-mcp server that manages interactive REPL programs in real PTYs. A human operator is watching the TUI and can intervene at any time.
+You have access to an iterm2-mcp server that controls iTerm2 tabs via its Python API. A human operator can see everything you do in real time in their iTerm2 windows.
 
-The MCP server is running at `http://127.0.0.1:8780/mcp` (default) and exposes the tools below.
+The MCP server is running at `http://127.0.0.1:8780/mcp` (default) and exposes the tools below. All tools target tabs by their human-readable ID (e.g. `bewildered-spectacles`).
 
 ## Available MCP Tools
 
-### Starting a Program
+### Creating a Tab
 
-Use `start_program` to launch an interactive program:
-
-```json
-{ "command": "python", "args": ["-i"], "cwd": "/path/to/project" }
-```
-
-Returns a program `id` (a human-readable name like `bewildered-spectacles`) you'll use for all subsequent interactions. The command is resolved to an absolute path and checked against the allowlist (if configured).
-
-### Sending Input
-
-Use `send_input` to type into the program:
+Use `create_tab` to open a new iTerm2 tab:
 
 ```json
-{ "id": "<program-id>", "input": "print('hello world')" }
+{ "command": "python3 -i", "profile": "Default" }
 ```
 
-A newline is appended automatically. Send exactly what you'd type at the keyboard.
+Returns a tab `id` (a human-readable name like `bewildered-spectacles`) you'll use for all subsequent interactions. If `command` is provided, it runs immediately in the new tab.
+
+### Writing to the Terminal
+
+Use `write_to_terminal` to send text (usually a command) to a tab:
+
+```json
+{ "id": "<tab-id>", "text": "ls -la", "newline": true, "wait_for_output": true }
+```
+
+- By default, a newline is appended and the server waits for output to settle before returning.
+- Returns `output_lines` — how many lines of output the command produced.
+- Set `wait_for_output: false` if you don't need to wait (e.g. for long-running commands).
 
 ### Reading Output
 
-Use `read_output` to get new output since your last read:
+Use `read_terminal_output` to get output from a tab:
 
 ```json
-{ "id": "<program-id>", "timeout": 3.0 }
+{ "id": "<tab-id>", "lines": null }
 ```
 
-- Set `timeout` to wait for output (avoids busy-polling). Use 2-5 seconds for interactive sessions.
-- Set `timeout` to 0 for an instant check.
-- Output is delta-based: you only get what's new since your last read.
-- Returns `is_running` so you know if the program has exited.
+Two modes:
+- **Incremental** (default, `lines: null`): Returns all new output since your last read. Each agent tracks its own cursor independently.
+- **Last N lines** (`lines: 20`): Returns the most recent N lines from the buffer regardless of cursor position.
 
-### Sending Signals
+Returns `output`, `num_lines`, and `is_alive`.
 
-Use `send_signal` to interrupt or control the program:
+### Sending Control Characters
+
+Use `send_control_character` to send Ctrl+C, Ctrl+D, etc.:
 
 ```json
-{ "id": "<program-id>", "signal": "SIGINT" }
+{ "id": "<tab-id>", "character": "c" }
 ```
 
-Common signals: `SIGINT` (Ctrl+C), `SIGTERM` (graceful stop), `SIGKILL` (force kill).
+Common characters:
+| Input | Effect |
+|-------|--------|
+| `"c"` | Ctrl+C (interrupt) |
+| `"d"` | Ctrl+D (EOF) |
+| `"z"` | Ctrl+Z (suspend) |
+| `"l"` | Ctrl+L (clear screen) |
+| `"\\"` | Ctrl+\\ (quit) |
+| `"esc"` | Escape key |
 
-### Listing Programs
+Also accepts `"ctrl-c"`, `"ctrl+d"` format.
 
-Use `list_programs` (no parameters) to see all managed programs and their status.
+### Getting a Screen Snapshot
 
-### Adopting a Human-Created Program
-
-The human operator can start programs directly from the TUI (Ctrl+N). These programs have no owner agent. Use `adopt_program` to claim ownership:
+Use `get_screen` to see exactly what's visible in a tab right now:
 
 ```json
-{ "id": "<program-id>" }
+{ "id": "<tab-id>" }
 ```
 
-After adopting, you can send input, read output, and manage the program normally. Use `list_programs` to discover unowned programs (those with an empty `owner_agent`).
+Returns the full visible screen text, line count, and cursor position (x, y). This is independent of the output buffer — it's a live snapshot.
 
-### Killing a Program
+### Listing and Discovering Tabs
 
-Use `kill_program` to terminate a program when you're done:
+- `list_tabs` — list all tracked tabs with their IDs, names, and status.
+- `discover_tabs` — find all existing iTerm2 sessions and start tracking untracked ones. Useful when the server starts after iTerm2 already has sessions open.
+
+### Adopting a Tab
+
+Use `adopt_tab` to claim ownership of an unowned tab (e.g. one found via `discover_tabs`):
 
 ```json
-{ "id": "<program-id>" }
+{ "id": "<tab-id>" }
 ```
 
-Sends SIGTERM, waits 2 seconds, then SIGKILL if needed.
+Fails if another agent already owns it. Check `list_tabs` for tabs with empty `owner_agent`.
+
+### Closing a Tab
+
+Use `close_tab` to close an iTerm2 tab and stop tracking it:
+
+```json
+{ "id": "<tab-id>" }
+```
+
+This force-closes the session — any running process in that tab will be terminated.
 
 ## Recommended Workflow
 
-1. **Start** the program you need (`start_program`)
-2. **Read** initial output to see the prompt (`read_output` with timeout 2-3s)
-3. **Send** your command (`send_input`)
-4. **Read** the result (`read_output` with timeout 3-5s)
+1. **Create** a tab for your task (`create_tab` with optional command)
+2. **Read** initial output to see the prompt (`read_terminal_output`)
+3. **Write** your command (`write_to_terminal`)
+4. **Read** the result (`read_terminal_output`)
 5. Repeat steps 3-4 as needed
-6. **Kill** when done (`kill_program`)
+6. **Close** when done (`close_tab`)
 
 ### Example: Python REPL Session
 
 ```
-1. start_program(command="python", args=["-i"])  →  get program_id
-2. read_output(id=program_id, timeout=2)          →  "Python 3.x.x ...\n>>>"
-3. send_input(id=program_id, input="2 + 2")
-4. read_output(id=program_id, timeout=2)          →  "4\n>>>"
-5. send_input(id=program_id, input="exit()")
-6. read_output(id=program_id, timeout=1)          →  is_running=false
+1. create_tab(command="python3 -i")              → id = "bewildered-spectacles"
+2. read_terminal_output(id=..., lines=5)          → "Python 3.x.x ...\n>>>"
+3. write_to_terminal(id=..., text="2 + 2")        → output_lines = 2
+4. read_terminal_output(id=...)                   → "4\n>>>"
+5. write_to_terminal(id=..., text="exit()")
+6. close_tab(id=...)
 ```
 
-### Example: Adopting a Human-Created Program
+### Example: Discovering Existing Sessions
 
 ```
-1. list_programs()                                   →  find program with empty owner_agent
-2. adopt_program(id="bewildered-spectacles")         →  success, you now own it
-3. read_output(id="bewildered-spectacles", timeout=2) →  see current state
-4. send_input(id="bewildered-spectacles", input="...")
+1. discover_tabs()                                → tracks all existing sessions
+2. list_tabs()                                    → find tab with empty owner_agent
+3. adopt_tab(id="bewildered-spectacles")          → you now own it
+4. get_screen(id="bewildered-spectacles")         → see current screen state
+5. write_to_terminal(id=..., text="whoami")
+6. read_terminal_output(id=...)                   → "username"
 ```
 
-### Example: Debugging with gdb
+### Example: Running a Build and Checking Output
 
 ```
-1. start_program(command="gdb", args=["./mybin"])
-2. read_output(id=..., timeout=3)                 →  gdb banner + "(gdb)"
-3. send_input(id=..., input="break main")
-4. read_output(id=..., timeout=2)                 →  breakpoint confirmation
-5. send_input(id=..., input="run")
-6. read_output(id=..., timeout=5)                 →  breakpoint hit info
+1. create_tab(command="make build")               → starts build
+2. write_to_terminal(id=..., text="make build", wait_for_output=false)
+   ... later ...
+3. read_terminal_output(id=..., lines=50)         → last 50 lines of build output
+4. get_screen(id=...)                             → check if build finished
+```
+
+### Example: Interrupting a Stuck Process
+
+```
+1. write_to_terminal(id=..., text="./long_running_script.sh")
+   ... output_lines=0 after wait, or process seems stuck ...
+2. send_control_character(id=..., character="c")  → Ctrl+C
+3. read_terminal_output(id=...)                   → "^C\nInterrupted"
 ```
 
 ## When You Get Stuck — Ask the Human
 
-A human operator is watching the TUI in real time. They can see everything you send and everything the program outputs. If you encounter a situation you cannot resolve on your own, **ask the human to help directly through the TUI**.
+The human can see everything you do in iTerm2 in real time. If you encounter a situation you cannot resolve, **ask the human for help**.
 
-### When to escalate to the human:
+### When to escalate:
 
-- **Authentication prompts** — if the program asks for a password, SSH passphrase, or 2FA code, tell the user: *"The program is asking for authentication. Please enter your credentials in the TUI input bar."*
-- **Unexpected interactive prompts** — if a program shows a menu, confirmation dialog, or TUI of its own that you can't navigate via text input, ask the human to handle it.
-- **Ambiguous errors** — if output is confusing or you're unsure what went wrong after 2-3 attempts, describe what you've tried and ask the human to take a look at the TUI.
-- **Destructive operations** — before running commands that delete data, modify production systems, or are otherwise irreversible, ask the human to confirm or do it themselves.
-- **Program hangs** — if `read_output` keeps returning empty output and `is_running` is still true after several attempts with increasing timeouts, tell the user: *"The program appears to be hanging. You can check the TUI and try sending input or Ctrl+C from the input bar."*
+- **Authentication prompts** — if a program asks for a password, SSH passphrase, or 2FA code: *"The program is asking for authentication. Please type your credentials directly in the iTerm2 tab."*
+- **Interactive TUI programs** — if a program shows a menu, confirmation dialog, or fullscreen UI (like vim, top) that you can't navigate: ask the human to handle it in iTerm2.
+- **Ambiguous errors** — if output is confusing after 2-3 attempts, describe what you've tried and ask the human to look at the iTerm2 tab.
+- **Destructive operations** — before running commands that delete data, modify production systems, or are irreversible, ask the human to confirm.
+- **Program hangs** — if output isn't appearing and the tab is still alive: *"The program appears to be hanging. Could you check the iTerm2 tab and see if there's a prompt I'm missing?"*
 
 ### How to ask:
 
-Simply tell the user in your response what you need them to do. Be specific:
+Be specific about which tab and what you need:
 
-- "The Python debugger is asking for input I can't determine. Please type the response in the repl-mcp TUI (the tab labeled 'python') and let me know when you're done."
-- "I need you to enter your sudo password in the repl-mcp TUI. The program is waiting for input in the 'bash' tab."
-- "The program seems stuck. Could you check the repl-mcp TUI and see if there's a prompt I'm missing?"
+- "The Python debugger is asking for input I can't determine. Please type your response directly in the iTerm2 tab named 'python3 -i' and let me know when done."
+- "I need your sudo password. Please enter it directly in the iTerm2 tab."
+- "The command seems stuck. Could you check the iTerm2 tab and press Ctrl+C if needed?"
 
-After the human acts, call `read_output` to see the new state and continue.
+After the human acts, call `read_terminal_output` or `get_screen` to see the new state.
 
 ## Tips
 
-- **Don't busy-poll.** Always use a `timeout` of 1-5 seconds on `read_output` rather than calling it in a tight loop with timeout=0.
-- **Read before sending.** Always read pending output before sending the next command so you know the program is ready.
-- **Check `is_running`.** If a program exits unexpectedly, `is_running` will be `false` in the `read_output` response. Don't keep sending input to a dead program.
-- **One command at a time.** Send a single command, read the output, then decide what to do next. Don't batch multiple commands unless the program expects it.
-- **Use signals when needed.** If a command is taking too long or you want to cancel, send `SIGINT` rather than killing the whole program.
-- **Clean up.** Kill programs when you're done with them to free resources.
+- **Read before writing.** Always read pending output before sending the next command so you know the program is ready for input.
+- **Use `get_screen` for orientation.** When you're not sure what state the terminal is in, `get_screen` gives you a live snapshot independent of the buffer.
+- **Check `is_alive`.** If a tab's session has ended, `is_alive` will be `false`. Don't keep writing to a dead session.
+- **Use `lines` for context.** When you need the last N lines regardless of your cursor position, pass `lines=N` to `read_terminal_output`.
+- **Omit `lines` for incremental reads.** When following a running process, omit `lines` to get just the new output since your last read.
+- **Use control characters, not tab closures.** If a command is hung, try `send_control_character("c")` before resorting to `close_tab`.
+- **One command at a time.** Send a single command, read the output, then decide. Don't batch commands.
+- **Clean up.** Close tabs when done to keep the iTerm2 workspace tidy.
