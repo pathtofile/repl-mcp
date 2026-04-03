@@ -65,15 +65,9 @@ Common signals: `SIGINT` (Ctrl+C), `SIGTERM` (graceful stop), `SIGKILL` (force k
 
 Use `list_programs` (no parameters) to see all managed programs and their status.
 
-### Adopting a Human-Created Program
+### Interacting with Human-Created Programs
 
-The human operator can start programs directly from the TUI (Ctrl+N). These programs have no owner agent. Use `adopt_program` to claim ownership:
-
-```json
-{ "id": "<program-id>" }
-```
-
-After adopting, you can send input, read output, and manage the program normally. Use `list_programs` to discover unowned programs (those with an empty `owner_agent`).
+The human operator can start programs directly from the TUI (Ctrl+N). Any agent can interact with any program by specifying its `id` — no adoption or ownership required. Use `list_programs` to discover available programs.
 
 ### Killing a Program
 
@@ -105,13 +99,12 @@ Sends SIGTERM, waits 2 seconds, then SIGKILL if needed.
 6. read_output(id=program_id, timeout=1)          →  is_running=false
 ```
 
-### Example: Adopting a Human-Created Program
+### Example: Interacting with a Human-Created Program
 
 ```
-1. list_programs()                                   →  find program with empty owner_agent
-2. adopt_program(id="bewildered-spectacles")         →  success, you now own it
-3. read_output(id="bewildered-spectacles", timeout=2) →  see current state
-4. send_input(id="bewildered-spectacles", input="...")
+1. list_programs()                                     →  find program by id
+2. read_output(id="bewildered-spectacles", timeout=2)  →  see current state
+3. send_input(id="bewildered-spectacles", input="...")
 ```
 
 ### Example: Debugging with gdb

@@ -35,7 +35,7 @@ A TUI application and MCP server that lets AI agents start, interact with, and m
 - **Bearer token auth** — optional authentication for the MCP endpoint
 - **Idle detection** — programs with no I/O for 60+ seconds show a yellow idle indicator
 - **Human-readable IDs** — programs get memorable names like `bewildered-spectacles` instead of UUIDs
-- **Human-created programs** — start programs from the TUI with `Ctrl+N` (with optional working directory and environment variables); agents can adopt them via `adopt_program`
+- **Human-created programs** — start programs from the TUI with `Ctrl+N` (with optional working directory and environment variables); any agent can interact with any program by ID
 
 ## Installation
 
@@ -214,19 +214,7 @@ Send a Unix signal to a running program.
 
 List all managed programs (no parameters).
 
-Returns an array of `{ id, command, pid, is_running, owner_agent, started_at }`.
-
-### `adopt_program`
-
-Adopt an unowned program (e.g. one started by the human via `Ctrl+N` in the TUI). This sets the calling agent as the program's owner.
-
-```json
-{ "id": "<program-id>" }
-```
-
-Returns: `{ "success": true, "id": "<program-id>", "owner_agent": "agent-1" }`
-
-Fails if the program is already owned by a different agent.
+Returns an array of `{ id, command, pid, is_running, started_at }`.
 
 ### `kill_program`
 

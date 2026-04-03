@@ -108,7 +108,6 @@ class ProgramManager:
         args: list[str] | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        owner_agent: str = "",
         initial_input: str | None = None,
     ) -> dict:
         """Start a new interactive program in a PTY.
@@ -167,7 +166,6 @@ class ProgramManager:
             pid=process.pid,
             pty_fd=master_fd,
             is_running=True,
-            owner_agent=owner_agent,
             process=process,
             cwd=cwd or os.getcwd(),
             env=env or {},
@@ -348,26 +346,6 @@ class ProgramManager:
 
         logger.info("Killed program %s (pid=%d)", program_id, prog.pid)
         return {"success": True}
-
-    async def adopt_program(self, program_id: str, agent_id: str) -> dict:
-        """Adopt an unowned program (or transfer ownership).
-
-        Returns dict with success status and the program id.
-        """
-        prog = self._get_program(program_id)
-        if prog.owner_agent and prog.owner_agent != agent_id:
-            raise RuntimeError(f"Program {program_id} is already owned by '{prog.owner_agent}'")
-        prog.owner_agent = agent_id
-        logger.info("Agent %s adopted program %s", agent_id, program_id)
-
-        # Notify TUI so it can update the tab label
-        if self.on_program_started is not None:
-            try:
-                self.on_program_started(prog)
-            except Exception:
-                logger.exception("on_program_started callback error (adopt)")
-
-        return {"success": True, "id": prog.id, "owner_agent": agent_id}
 
     def list_programs(self) -> list[dict]:
         """Return a list of all managed programs as dicts."""

@@ -71,13 +71,11 @@ class ReplMCPServer:
                 env: Additional environment variables
                 initial_input: Text to send to the program immediately after it starts
             """
-            agent_label = self._get_agent_label(ctx)
             return await self.manager.start_program(
                 command=command,
                 args=args or [],
                 cwd=cwd,
                 env=env or {},
-                owner_agent=agent_label,
                 initial_input=initial_input,
             )
 
@@ -114,18 +112,6 @@ class ReplMCPServer:
             """
             agent_label = self._get_agent_label(ctx)
             return await self.manager.read_output(id, agent_id=agent_label, timeout=timeout)
-
-        @self.mcp.tool()
-        async def adopt_program(id: str, ctx: Context) -> dict:
-            """Adopt an unowned program (e.g. one created by the human operator).
-
-            This sets you as the owner so you can interact with it.
-
-            Args:
-                id: Program name
-            """
-            agent_label = self._get_agent_label(ctx)
-            return await self.manager.adopt_program(id, agent_id=agent_label)
 
         @self.mcp.tool()
         async def list_programs() -> list[dict]:

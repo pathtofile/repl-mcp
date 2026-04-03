@@ -44,8 +44,7 @@ def _program_display_name(command: str) -> str:
 def _build_tab_label(prog: Program, icon: str) -> str:
     """Build a formatted tab label for a program."""
     name = _program_display_name(prog.command)
-    agent_info = f" ({prog.owner_agent})" if prog.owner_agent else ""
-    return f"{icon} {name} [{prog.id}]{agent_info}"
+    return f"{icon} {name} [{prog.id}]"
 
 
 class ProgramTab(TabPane):
@@ -299,7 +298,7 @@ class ReplMCPApp(App):
                 tab.label = _build_tab_label(prog, icon)
 
     def _on_program_started(self, program: Program) -> None:
-        """Called when a new program is started or adopted (from async tasks on the main thread)."""
+        """Called when a new program is started (from async tasks on the main thread)."""
         self.call_later(self._add_program_tab, program)
 
     def _add_program_tab(self, program: Program) -> None:
@@ -309,7 +308,7 @@ class ReplMCPApp(App):
         tabs = self.query_one("#main-content", TabbedContent)
         tab_id = f"tab-{program.id}"
 
-        # If the tab already exists (e.g. adoption), just update its label
+        # If the tab already exists, just update its label
         try:
             existing_tab = tabs.get_tab(tab_id)
             existing_tab.label = label
@@ -449,7 +448,6 @@ class ReplMCPApp(App):
                     args=args,
                     cwd=result_dict.get("cwd"),
                     env=result_dict.get("env"),
-                    owner_agent="",
                     initial_input=result_dict.get("initial_input"),
                 )
                 self.notify(f"Started {command} as [{result['id']}]")

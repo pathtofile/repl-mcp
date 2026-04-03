@@ -23,7 +23,6 @@ class Program:
     pty_fd: int = -1
     output_buffer: list[str] = field(default_factory=list)
     is_running: bool = True
-    owner_agent: str = ""
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     read_cursors: dict[str, int] = field(
         default_factory=dict
@@ -40,6 +39,5 @@ class Program:
             "command": self.command,
             "pid": self.pid,
             "is_running": self.is_running,
-            "owner_agent": self.owner_agent,
             "started_at": self.started_at.isoformat(),
         }

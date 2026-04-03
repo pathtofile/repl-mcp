@@ -63,10 +63,6 @@ class TestStartProgram:
         result = await manager.start_program("sleep", args=["30"])
         assert result["id"] in manager._programs
 
-    async def test_start_with_owner_agent(self, manager):
-        result = await manager.start_program("sleep", args=["30"], owner_agent="agent-1")
-        prog = manager._programs[result["id"]]
-        assert prog.owner_agent == "agent-1"
 
 
 class TestSendInput:
@@ -249,11 +245,6 @@ class TestListPrograms:
         programs = manager.list_programs()
         assert "started_at" in programs[0]
 
-    async def test_list_contains_owner_agent(self, manager):
-        await manager.start_program("sleep", args=["30"], owner_agent="agent-1")
-        programs = manager.list_programs()
-        assert programs[0]["owner_agent"] == "agent-1"
-
     async def test_exited_program_removed_from_list(self, manager):
         result = await manager.start_program("echo", args=["bye"])
         prog_id = result["id"]
@@ -262,30 +253,3 @@ class TestListPrograms:
         assert all(p["id"] != prog_id for p in programs)
 
 
-class TestAdoptProgram:
-    async def test_adopt_unowned_program(self, manager):
-        result = await manager.start_program("cat", owner_agent="")
-        prog_id = result["id"]
-        await asyncio.sleep(0.2)
-        adopt_result = await manager.adopt_program(prog_id, agent_id="agent-1")
-        assert adopt_result["success"] is True
-        assert adopt_result["owner_agent"] == "agent-1"
-        assert manager._programs[prog_id].owner_agent == "agent-1"
-
-    async def test_adopt_already_owned_by_same_agent(self, manager):
-        result = await manager.start_program("cat", owner_agent="agent-1")
-        prog_id = result["id"]
-        await asyncio.sleep(0.2)
-        adopt_result = await manager.adopt_program(prog_id, agent_id="agent-1")
-        assert adopt_result["success"] is True
-
-    async def test_adopt_already_owned_by_other_agent(self, manager):
-        result = await manager.start_program("cat", owner_agent="agent-1")
-        prog_id = result["id"]
-        await asyncio.sleep(0.2)
-        with pytest.raises(RuntimeError, match="already owned"):
-            await manager.adopt_program(prog_id, agent_id="agent-2")
-
-    async def test_adopt_nonexistent_program(self, manager):
-        with pytest.raises(KeyError):
-            await manager.adopt_program("nonexistent-id", agent_id="agent-1")
