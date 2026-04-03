@@ -35,7 +35,7 @@ A TUI application and MCP server that lets AI agents start, interact with, and m
 - **Bearer token auth** — optional authentication for the MCP endpoint
 - **Idle detection** — programs with no I/O for 60+ seconds show a yellow idle indicator
 - **Human-readable IDs** — programs get memorable names like `bewildered-spectacles` instead of UUIDs
-- **Human-created programs** — start programs from the TUI with `Ctrl+N`; agents can adopt them via `adopt_program`
+- **Human-created programs** — start programs from the TUI with `Ctrl+N` (with optional working directory and environment variables); agents can adopt them via `adopt_program`
 
 ## Installation
 
@@ -90,10 +90,13 @@ repl-mcp --host 0.0.0.0 --port 9000 --token secret --allow python bash --scrollb
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+N` | Start a new program |
+| `Ctrl+N` | Start a new program (with optional working dir and env vars) |
 | `Ctrl+T` | Focus the input bar |
+| `Ctrl+C` | Copy active program's unique ID to clipboard |
 | `Ctrl+Q` | Quit |
 | Tab click | Switch between managed programs |
+
+> **Tip:** Use `Ctrl+C` (or `Cmd+C` on macOS, depending on your terminal) while a program's tab is selected to copy its unique name (e.g. `noxious-penny`) to your clipboard. You can then paste it directly into a Claude Code conversation to reference that program by ID.
 
 ### Connecting Claude Code
 

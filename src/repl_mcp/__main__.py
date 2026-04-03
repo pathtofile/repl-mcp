@@ -1,6 +1,7 @@
 """Entry point for repl-mcp."""
 
 import argparse
+import json
 import sys
 
 from .auth import generate_token
@@ -52,7 +53,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=10000,
         help="Number of scrollback lines to keep (default: 10000)",
     )
+    parser.add_argument(
+        "--startup-procs",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Path to a JSON file listing programs to launch at startup",
+    )
+    parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Program and args to launch at startup (after --)",
+    )
     return parser.parse_args(argv)
+
+
+def _load_startup_procs(path: str) -> list[dict]:
+    """Load and validate startup procs from a JSON file.
+
+    Expected format: a JSON array of objects, each with at least a "command" key,
+    and optional "args", "cwd", and "env" keys.
+    """
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError(f"--startup-procs file must contain a JSON array, got {type(data).__name__}")
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict) or "command" not in entry:
+            raise ValueError(
+                f"Entry {i} in --startup-procs must be an object with a \"command\" key"
+            )
+    return data
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -65,6 +96,24 @@ def main(argv: list[str] | None = None) -> None:
         token = generate_token()
         print(f"Generated token: {token}")
         sys.exit(0)
+
+    # Build list of programs to start at launch
+    startup_procs: list[dict] = []
+
+    if args.startup_procs:
+        try:
+            startup_procs.extend(_load_startup_procs(args.startup_procs))
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            print(f"Error loading --startup-procs: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    # Handle trailing `-- <command> [args...]`
+    cmd_remainder = args.command
+    # argparse REMAINDER includes the leading '--' if present; strip it
+    if cmd_remainder and cmd_remainder[0] == "--":
+        cmd_remainder = cmd_remainder[1:]
+    if cmd_remainder:
+        startup_procs.append({"command": cmd_remainder[0], "args": cmd_remainder[1:]})
 
     # Create the program manager
     manager = ProgramManager()
@@ -87,6 +136,7 @@ def main(argv: list[str] | None = None) -> None:
         port=args.port,
         token=token,
         scrollback=args.scrollback,
+        startup_procs=startup_procs,
     )
 
     try:

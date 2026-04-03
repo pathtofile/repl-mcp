@@ -195,28 +195,13 @@ class ProgramManager:
         if not text.endswith("\n"):
             text += "\n"
 
-        # Write to PTY
+        # Write to PTY — the terminal echo will make it visible naturally
         try:
             os.write(prog.pty_fd, text.encode("utf-8"))
         except OSError as exc:
             raise RuntimeError(f"Failed to write to PTY: {exc}") from exc
 
-        # Track input in output buffer with attribution marker for TUI coloring
-        marker = self._make_input_marker(text, source, agent_id)
-        prog.output_buffer.append(marker)
-        self._enforce_scrollback(prog)
-
         prog.last_io_time = datetime.now(timezone.utc)
-
-        # Notify waiters
-        self._wake_event(program_id)
-
-        # Notify TUI callback
-        if self.on_output is not None:
-            try:
-                self.on_output(program_id, text, source)
-            except Exception:
-                logger.exception("on_output callback error")
 
         return {"success": True}
 
@@ -283,7 +268,10 @@ class ProgramManager:
 
         Returns dict with success status.
         """
-        prog = self._get_program(program_id)
+        prog = self._programs.get(program_id)
+        if prog is None:
+            # Already exited and cleaned up
+            return {"success": True}
 
         if prog.is_running and prog.process is not None:
             # Send SIGTERM
@@ -325,6 +313,10 @@ class ProgramManager:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+
+        # Remove program from tracking so MCP clients no longer see it
+        self._programs.pop(program_id, None)
+        self._output_events.pop(program_id, None)
 
         logger.info("Killed program %s (pid=%d)", program_id, prog.pid)
         return {"success": True}
@@ -424,16 +416,6 @@ class ProgramManager:
             for agent_id in prog.read_cursors:
                 prog.read_cursors[agent_id] = max(0, prog.read_cursors[agent_id] - excess)
 
-    @staticmethod
-    def _make_input_marker(text: str, source: str, agent_id: str) -> str:
-        """Build an OSC-8 hyperlink-encoded attribution marker for input lines.
-
-        Uses the OSC-8 terminal hyperlink escape sequence to embed metadata
-        (source and agent_id) that the TUI can parse for coloring, without
-        affecting plain-text display in terminals that support OSC-8.
-        """
-        return f"\x1b]8;;input:{source}:{agent_id}\x1b\\{text}\x1b]8;;\x1b\\"
-
     def _wake_event(self, program_id: str) -> None:
         """Notify any asyncio waiters that new output is available."""
         event = self._output_events.get(program_id)
@@ -497,6 +479,14 @@ class ProgramManager:
                 prog.process.poll()
             prog.is_running = False
 
+            # Clean up PTY fd
+            if prog.pty_fd >= 0:
+                try:
+                    os.close(prog.pty_fd)
+                except OSError:
+                    pass
+                prog.pty_fd = -1
+
             # Wake any waiters so they see is_running=False
             event = self._output_events.get(prog.id)
             if event is not None:
@@ -508,5 +498,10 @@ class ProgramManager:
                     self.on_program_exited(prog)
                 except Exception:
                     logger.exception("on_program_exited callback error")
+
+            # Remove program from tracking so MCP clients no longer see it
+            self._programs.pop(prog.id, None)
+            self._output_events.pop(prog.id, None)
+            self._read_tasks.pop(prog.id, None)
 
             logger.info("Read loop ended for program %s (pid=%d)", prog.id, prog.pid)

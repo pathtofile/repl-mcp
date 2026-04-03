@@ -15,7 +15,6 @@ from textual.widgets import (
     Header,
     Footer,
     Static,
-    RichLog,
     Input,
     TabbedContent,
     TabPane,
@@ -26,6 +25,7 @@ from rich.text import Text
 
 from .manager import ProgramManager
 from .models import Program
+from .terminal_widget import TerminalPane
 
 # Tab status icons
 ICON_RUNNING = "\u25cf"  # filled circle
@@ -51,11 +51,10 @@ class ProgramTab(TabPane):
         self._scrollback = scrollback
 
     def compose(self) -> ComposeResult:
-        yield RichLog(
-            id=f"log-{self.program_id}",
-            wrap=True,
-            markup=True,
-            max_lines=self._scrollback,
+        yield TerminalPane(
+            program_id=self.program_id,
+            scrollback=self._scrollback,
+            id=f"terminal-{self.program_id}",
         )
 
 
@@ -68,7 +67,9 @@ class StatusBar(Static):
     token_display: reactive[str] = reactive("")
 
     def render(self) -> str:
-        token_info = f" | Token: {self.token_display}" if self.token_display else " | No auth"
+        token_info = (
+            f" | Token: {self.token_display}" if self.token_display else " | No auth"
+        )
         return (
             f"  Port: {self.port}{token_info}"
             f" | Agents: {self.agent_count}"
@@ -76,7 +77,7 @@ class StatusBar(Static):
         )
 
 
-class NewProgramScreen(ModalScreen[str | None]):
+class NewProgramScreen(ModalScreen[dict | None]):
     """Modal dialog for entering a command to start a new program."""
 
     CSS = """
@@ -85,18 +86,24 @@ class NewProgramScreen(ModalScreen[str | None]):
     }
 
     #new-program-dialog {
-        width: 60;
+        width: 70;
         height: auto;
         padding: 1 2;
         background: $surface;
         border: thick $accent;
     }
 
-    #new-program-label {
-        margin-bottom: 1;
+    .field-label {
+        margin-top: 1;
+        margin-bottom: 0;
+        color: $text-muted;
     }
 
-    #new-program-input {
+    .field-label-first {
+        margin-bottom: 0;
+    }
+
+    .field-input {
         width: 100%;
     }
     """
@@ -104,16 +111,45 @@ class NewProgramScreen(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Static(id="new-program-dialog"):
             yield Static(
-                "Enter command to start (e.g. python3, gdb ./a.out):", id="new-program-label"
+                "Command (e.g. python3, gdb ./a.out):", classes="field-label-first"
             )
-            yield Input(placeholder="command [args...]", id="new-program-input")
+            yield Input(
+                placeholder="command [args...]",
+                id="new-program-command",
+                classes="field-input",
+            )
+            yield Static("Working directory (optional):", classes="field-label")
+            yield Input(
+                placeholder="/path/to/dir", id="new-program-cwd", classes="field-input"
+            )
+            yield Static(
+                "Environment variables (optional, KEY=VAL KEY2=VAL2):",
+                classes="field-label",
+            )
+            yield Input(
+                placeholder="FOO=bar BAZ=qux",
+                id="new-program-env",
+                classes="field-input",
+            )
 
     def on_mount(self) -> None:
-        self.query_one("#new-program-input", Input).focus()
+        self.query_one("#new-program-command", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        value = event.value.strip()
-        self.dismiss(value if value else None)
+        command = self.query_one("#new-program-command", Input).value.strip()
+        if not command:
+            self.dismiss(None)
+            return
+        cwd = self.query_one("#new-program-cwd", Input).value.strip() or None
+        env_str = self.query_one("#new-program-env", Input).value.strip()
+        env = None
+        if env_str:
+            env = {}
+            for part in shlex.split(env_str):
+                if "=" in part:
+                    key, _, val = part.partition("=")
+                    env[key] = val
+        self.dismiss({"command": command, "cwd": cwd, "env": env})
 
     def on_key(self, event) -> None:
         if event.key == "escape":
@@ -138,12 +174,6 @@ class ReplMCPApp(App):
         color: $text-muted;
     }
 
-    #input-bar {
-        dock: bottom;
-        height: 3;
-        padding: 0 1;
-    }
-
     #status-bar {
         dock: bottom;
         height: 1;
@@ -154,17 +184,12 @@ class ReplMCPApp(App):
     TabbedContent {
         height: 1fr;
     }
-
-    RichLog {
-        height: 1fr;
-        scrollbar-size: 1 1;
-    }
     """
 
     BINDINGS = [
         ("ctrl+q", "quit", "Quit"),
-        ("ctrl+t", "focus_input", "Focus Input"),
         ("ctrl+n", "new_program", "New Program"),
+        ("ctrl+c", "copy_program_id", "Copy Program ID"),
     ]
 
     def __init__(
@@ -174,6 +199,7 @@ class ReplMCPApp(App):
         port: int = 8780,
         token: str | None = None,
         scrollback: int = 10000,
+        startup_procs: list[dict] | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -182,6 +208,7 @@ class ReplMCPApp(App):
         self._port = port
         self._token = token
         self._scrollback = scrollback
+        self._startup_procs = startup_procs or []
         self._active_program_id: str | None = None
         self._idle_check_task: asyncio.Task | None = None
         self._server_task: asyncio.Task | None = None
@@ -193,7 +220,6 @@ class ReplMCPApp(App):
             "No programs running. Press Ctrl+N to start one, or wait for an agent.",
             id="no-programs",
         )
-        yield Input(placeholder="Type command and press Enter...", id="input-bar")
         yield StatusBar(id="status-bar")
 
     def on_mount(self) -> None:
@@ -202,9 +228,6 @@ class ReplMCPApp(App):
         if self._token:
             # Show only first 4 chars to limit exposure
             status.token_display = self._token[:4] + "..."
-
-        input_widget = self.query_one("#input-bar", Input)
-        input_widget.disabled = True  # No program selected yet
 
         if self.manager:
             self.manager.on_output = self._on_program_output
@@ -216,6 +239,25 @@ class ReplMCPApp(App):
         # Start the MCP HTTP server as a background task in the same event loop
         if self.server_instance:
             self._server_task = asyncio.create_task(self.server_instance.start())
+
+        # Launch any startup programs requested via CLI
+        if self._startup_procs and self.manager:
+            asyncio.create_task(self._launch_startup_procs())
+
+    async def _launch_startup_procs(self) -> None:
+        """Launch programs specified via --startup-procs or -- command line args."""
+        for proc in self._startup_procs:
+            try:
+                await self.manager.start_program(
+                    command=proc["command"],
+                    args=proc.get("args"),
+                    cwd=proc.get("cwd"),
+                    env=proc.get("env"),
+                )
+            except Exception as exc:
+                self.notify(
+                    f"Failed to start {proc['command']}: {exc}", severity="error"
+                )
 
     async def _check_idle_programs(self) -> None:
         """Periodically check for idle programs and update tab indicators."""
@@ -240,25 +282,21 @@ class ReplMCPApp(App):
                 agent_info = f" ({prog.owner_agent})" if prog.owner_agent else ""
 
                 if not prog.is_running:
-                    tab.label = Text(f"{ICON_STOPPED} {name}{agent_info}")
+                    tab.label = Text(f"{ICON_STOPPED} {name} [{prog_id}]{agent_info}")
                 elif idle_seconds > IDLE_THRESHOLD_SECONDS:
-                    tab.label = Text(f"{ICON_IDLE} {name}{agent_info}")
+                    tab.label = Text(f"{ICON_IDLE} {name} [{prog_id}]{agent_info}")
                 else:
-                    tab.label = Text(f"{ICON_RUNNING} {name}{agent_info}")
+                    tab.label = Text(f"{ICON_RUNNING} {name} [{prog_id}]{agent_info}")
 
     def _on_program_started(self, program: Program) -> None:
-        """Called when a new program is started or adopted (may be from any thread)."""
-        try:
-            self.call_from_thread(self._add_program_tab, program)
-        except RuntimeError:
-            # Already on the main thread (e.g. human-initiated start)
-            self._add_program_tab(program)
+        """Called when a new program is started or adopted (from async tasks on the main thread)."""
+        self.call_later(self._add_program_tab, program)
 
     def _add_program_tab(self, program: Program) -> None:
         """Add a new tab for a program, or update an existing one (runs on the main/UI thread)."""
         name = _program_display_name(program.command)
         agent_info = f" ({program.owner_agent})" if program.owner_agent else ""
-        title = f"{ICON_RUNNING} {name}{agent_info}"
+        title = f"{ICON_RUNNING} {name} [{program.id}]{agent_info}"
 
         tabs = self.query_one("#main-content", TabbedContent)
         tab_id = f"tab-{program.id}"
@@ -275,6 +313,17 @@ class ReplMCPApp(App):
         new_tab = ProgramTab(program.id, title, scrollback=self._scrollback)
         tabs.add_pane(new_tab)
 
+        # Set the PTY fd on the terminal pane after it's mounted
+        def _set_pty_fd():
+            try:
+                terminal = self.query_one(f"#terminal-{program.id}", TerminalPane)
+                terminal._pty_fd = program.pty_fd
+                terminal.focus()
+            except NoMatches:
+                pass
+
+        self.call_later(_set_pty_fd)
+
         # Hide the "no programs" placeholder
         try:
             no_progs = self.query_one("#no-programs")
@@ -282,86 +331,55 @@ class ReplMCPApp(App):
         except NoMatches:
             pass
 
-        # Enable the input bar
-        input_widget = self.query_one("#input-bar", Input)
-        input_widget.disabled = False
-
         self._active_program_id = program.id
 
         self._update_status()
 
     def _on_program_exited(self, program: Program) -> None:
-        """Called when a program exits (may be from any thread)."""
-        try:
-            self.call_from_thread(self._update_exited_tab, program)
-        except RuntimeError:
-            self._update_exited_tab(program)
+        """Called when a program exits (from async tasks on the main thread)."""
+        self.call_later(self._update_exited_tab, program)
 
     def _update_exited_tab(self, program: Program) -> None:
-        """Update tab appearance for an exited program (runs on main thread)."""
-        name = _program_display_name(program.command)
-        agent_info = f" ({program.owner_agent})" if program.owner_agent else ""
+        """Remove the tab for an exited program (runs on main thread)."""
         try:
             tabs = self.query_one("#main-content", TabbedContent)
-            tab = tabs.get_tab(f"tab-{program.id}")
-            tab.label = Text(f"{ICON_STOPPED} {name}{agent_info}")
-        except NoMatches:
-            pass
-
-        # Write exit message to the program's log
-        try:
-            log = self.query_one(f"#log-{program.id}", RichLog)
-            log.write(Text("\n[Program exited]", style="bold red"))
+            tabs.remove_pane(f"tab-{program.id}")
         except NoMatches:
             pass
 
         self._update_status()
 
-    def _on_program_output(self, program_id: str, text: str, source: str = "program") -> None:
-        """Called when new output is available (may be from any thread)."""
-        try:
-            self.call_from_thread(self._append_output, program_id, text, source)
-        except RuntimeError:
-            self._append_output(program_id, text, source)
+    def _on_program_output(
+        self, program_id: str, text: str, source: str = "program"
+    ) -> None:
+        """Called when new output is available (from async tasks on the main thread)."""
+        self.call_later(self._append_output, program_id, text, source)
 
-    def _append_output(self, program_id: str, text: str, source: str = "program") -> None:
-        """Append output to the program's RichLog widget (runs on main thread)."""
+    def _append_output(
+        self, program_id: str, text: str, source: str = "program"
+    ) -> None:
+        """Feed output to the program's terminal emulator (runs on main thread)."""
         try:
-            log = self.query_one(f"#log-{program_id}", RichLog)
+            terminal = self.query_one(f"#terminal-{program_id}", TerminalPane)
         except NoMatches:
             return
 
-        if source == "ai":
-            log.write(Text(text, style="cyan"))
-        elif source == "human":
-            log.write(Text(text, style="green"))
-        else:
-            # Program output -- write as plain text
-            log.write(text.rstrip("\n"))
+        terminal.feed(text)
 
-    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        """Track which program tab is currently active."""
+    def on_tabbed_content_tab_activated(
+        self, event: TabbedContent.TabActivated
+    ) -> None:
+        """Track which program tab is currently active and focus its terminal."""
         tab_id = event.pane.id or ""
         if tab_id.startswith("tab-"):
             self._active_program_id = tab_id[4:]
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle human input from the input bar."""
-        text = event.value
-        if not text or not self._active_program_id or not self.manager:
-            return
-
-        event.input.value = ""
-
-        try:
-            await self.manager.send_input(
-                self._active_program_id,
-                text,
-                source="human",
-                agent_id="human",
-            )
-        except Exception as e:
-            self.notify(f"Error sending input: {e}", severity="error")
+            try:
+                terminal = self.query_one(
+                    f"#terminal-{self._active_program_id}", TerminalPane
+                )
+                terminal.focus()
+            except NoMatches:
+                pass
 
     async def on_paste(self, event: Paste) -> None:
         """Handle paste events — send pasted text directly to the active program.
@@ -415,11 +433,11 @@ class ReplMCPApp(App):
     def action_new_program(self) -> None:
         """Open dialog to start a new program from the TUI."""
 
-        async def _on_result(command_str: str | None) -> None:
-            if not command_str or not self.manager:
+        async def _on_result(result_dict: dict | None) -> None:
+            if not result_dict or not self.manager:
                 return
             try:
-                parts = shlex.split(command_str)
+                parts = shlex.split(result_dict["command"])
             except ValueError as e:
                 self.notify(f"Invalid command: {e}", severity="error")
                 return
@@ -427,7 +445,11 @@ class ReplMCPApp(App):
             args = parts[1:]
             try:
                 result = await self.manager.start_program(
-                    command=command, args=args, owner_agent=""
+                    command=command,
+                    args=args,
+                    cwd=result_dict.get("cwd"),
+                    env=result_dict.get("env"),
+                    owner_agent="",
                 )
                 self.notify(f"Started {command} as [{result['id']}]")
             except Exception as e:
@@ -457,6 +479,14 @@ class ReplMCPApp(App):
     def action_focus_input(self) -> None:
         """Focus the input bar."""
         self.query_one("#input-bar", Input).focus()
+
+    def action_copy_program_id(self) -> None:
+        """Copy the active program's unique ID to the system clipboard."""
+        if self._active_program_id:
+            self.copy_to_clipboard(self._active_program_id)
+            self.notify(f"Copied: {self._active_program_id}")
+        else:
+            self.notify("No active program", severity="warning")
 
     async def action_quit(self) -> None:
         """Quit the application, killing all managed programs and cancelling background tasks."""

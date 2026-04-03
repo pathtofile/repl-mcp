@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repl-mcp"
-version = "0.2.0"
+version = "1.0.0"
 description = "A TUI application and MCP server for managing interactive REPL programs"
 readme = "README.md"
 license = "MIT"
