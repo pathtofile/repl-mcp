@@ -42,6 +42,13 @@ def _program_display_name(command: str) -> str:
     return command.split("/")[-1].split()[0]
 
 
+def _build_tab_label(prog: Program, icon: str) -> Text:
+    """Build a formatted tab label for a program."""
+    name = _program_display_name(prog.command)
+    agent_info = f" ({prog.owner_agent})" if prog.owner_agent else ""
+    return Text(f"{icon} {name} [{prog.id}]{agent_info}")
+
+
 class ProgramTab(TabPane):
     """A tab pane for a single managed program."""
 
@@ -67,9 +74,7 @@ class StatusBar(Static):
     token_display: reactive[str] = reactive("")
 
     def render(self) -> str:
-        token_info = (
-            f" | Token: {self.token_display}" if self.token_display else " | No auth"
-        )
+        token_info = f" | Token: {self.token_display}" if self.token_display else " | No auth"
         return (
             f"  Port: {self.port}{token_info}"
             f" | Agents: {self.agent_count}"
@@ -110,18 +115,14 @@ class NewProgramScreen(ModalScreen[dict | None]):
 
     def compose(self) -> ComposeResult:
         with Static(id="new-program-dialog"):
-            yield Static(
-                "Command (e.g. python3, gdb ./a.out):", classes="field-label-first"
-            )
+            yield Static("Command (e.g. python3, gdb ./a.out):", classes="field-label-first")
             yield Input(
                 placeholder="command [args...]",
                 id="new-program-command",
                 classes="field-input",
             )
             yield Static("Working directory (optional):", classes="field-label")
-            yield Input(
-                placeholder="/path/to/dir", id="new-program-cwd", classes="field-input"
-            )
+            yield Input(placeholder="/path/to/dir", id="new-program-cwd", classes="field-input")
             yield Static(
                 "Environment variables (optional, KEY=VAL KEY2=VAL2):",
                 classes="field-label",
@@ -158,9 +159,7 @@ class NewProgramScreen(ModalScreen[dict | None]):
                 if "=" in part:
                     key, _, val = part.partition("=")
                     env[key] = val
-        initial_input = (
-            self.query_one("#new-program-initial-input", Input).value.strip() or None
-        )
+        initial_input = self.query_one("#new-program-initial-input", Input).value.strip() or None
         self.dismiss({"command": command, "cwd": cwd, "env": env, "initial_input": initial_input})
 
     def on_key(self, event) -> None:
@@ -269,9 +268,7 @@ class ReplMCPApp(App):
                     initial_input=proc.get("initial_input"),
                 )
             except Exception as exc:
-                self.notify(
-                    f"Failed to start {proc['command']}: {exc}", severity="error"
-                )
+                self.notify(f"Failed to start {proc['command']}: {exc}", severity="error")
 
         await asyncio.gather(*[_start_one(p) for p in self._startup_procs])
 
@@ -294,15 +291,13 @@ class ReplMCPApp(App):
                 except NoMatches:
                     continue
 
-                name = _program_display_name(prog.command)
-                agent_info = f" ({prog.owner_agent})" if prog.owner_agent else ""
-
                 if not prog.is_running:
-                    tab.label = Text(f"{ICON_STOPPED} {name} [{prog_id}]{agent_info}")
+                    icon = ICON_STOPPED
                 elif idle_seconds > IDLE_THRESHOLD_SECONDS:
-                    tab.label = Text(f"{ICON_IDLE} {name} [{prog_id}]{agent_info}")
+                    icon = ICON_IDLE
                 else:
-                    tab.label = Text(f"{ICON_RUNNING} {name} [{prog_id}]{agent_info}")
+                    icon = ICON_RUNNING
+                tab.label = _build_tab_label(prog, icon)
 
     def _on_program_started(self, program: Program) -> None:
         """Called when a new program is started or adopted (from async tasks on the main thread)."""
@@ -310,9 +305,7 @@ class ReplMCPApp(App):
 
     def _add_program_tab(self, program: Program) -> None:
         """Add a new tab for a program, or update an existing one (runs on the main/UI thread)."""
-        name = _program_display_name(program.command)
-        agent_info = f" ({program.owner_agent})" if program.owner_agent else ""
-        title = f"{ICON_RUNNING} {name} [{program.id}]{agent_info}"
+        label = _build_tab_label(program, ICON_RUNNING)
 
         tabs = self.query_one("#main-content", TabbedContent)
         tab_id = f"tab-{program.id}"
@@ -320,13 +313,13 @@ class ReplMCPApp(App):
         # If the tab already exists (e.g. adoption), just update its label
         try:
             existing_tab = tabs.get_tab(tab_id)
-            existing_tab.label = Text(title)
+            existing_tab.label = label
             self._update_status()
             return
         except NoMatches:
             pass
 
-        new_tab = ProgramTab(program.id, title, scrollback=self._scrollback)
+        new_tab = ProgramTab(program.id, label, scrollback=self._scrollback)
         tabs.add_pane(new_tab)
 
         # Set the PTY fd on the terminal pane after it's mounted
@@ -365,15 +358,11 @@ class ReplMCPApp(App):
 
         self._update_status()
 
-    def _on_program_output(
-        self, program_id: str, text: str, source: str = "program"
-    ) -> None:
+    def _on_program_output(self, program_id: str, text: str, source: str = "program") -> None:
         """Called when new output is available (from async tasks on the main thread)."""
         self.call_later(self._append_output, program_id, text, source)
 
-    def _append_output(
-        self, program_id: str, text: str, source: str = "program"
-    ) -> None:
+    def _append_output(self, program_id: str, text: str, source: str = "program") -> None:
         """Feed output to the program's terminal emulator (runs on main thread)."""
         try:
             terminal = self.query_one(f"#terminal-{program_id}", TerminalPane)
@@ -382,17 +371,13 @@ class ReplMCPApp(App):
 
         terminal.feed(text)
 
-    def on_tabbed_content_tab_activated(
-        self, event: TabbedContent.TabActivated
-    ) -> None:
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """Track which program tab is currently active and focus its terminal."""
         tab_id = event.pane.id or ""
         if tab_id.startswith("tab-"):
             self._active_program_id = tab_id[4:]
             try:
-                terminal = self.query_one(
-                    f"#terminal-{self._active_program_id}", TerminalPane
-                )
+                terminal = self.query_one(f"#terminal-{self._active_program_id}", TerminalPane)
                 terminal.focus()
             except NoMatches:
                 pass

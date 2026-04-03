@@ -86,12 +86,10 @@ def _load_startup_procs(path: str) -> list[dict]:
     procs = []
     for i, entry in enumerate(data):
         if not isinstance(entry, dict) or "command" not in entry:
-            raise ValueError(
-                f"Entry {i} in --startup-procs must be a mapping with a \"command\" key"
-            )
+            raise ValueError(f'Entry {i} in --startup-procs must be a mapping with a "command" key')
         parts = shlex.split(entry["command"])
         if not parts:
-            raise ValueError(f"Entry {i} in --startup-procs has an empty \"command\"")
+            raise ValueError(f'Entry {i} in --startup-procs has an empty "command"')
         proc = {"command": parts[0], "args": parts[1:]}
         for key in ("cwd", "env", "initial_input"):
             if key in entry:

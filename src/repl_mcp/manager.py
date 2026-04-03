@@ -83,9 +83,7 @@ class ProgramManager:
                 if os.path.isfile(real):
                     resolved.add(real)
                 else:
-                    logger.warning(
-                        "Allowlist entry '%s' could not be resolved; skipping", name
-                    )
+                    logger.warning("Allowlist entry '%s' could not be resolved; skipping", name)
         self._allowlist = resolved
 
     def _check_allowlist(self, resolved_path: str) -> None:
@@ -188,9 +186,7 @@ class ProgramManager:
         task = asyncio.create_task(self._read_loop(prog))
         self._read_tasks[prog.id] = task
 
-        logger.info(
-            "Started program %s (pid=%d, cmd=%s)", prog.id, prog.pid, resolved_command
-        )
+        logger.info("Started program %s (pid=%d, cmd=%s)", prog.id, prog.pid, resolved_command)
 
         # Notify TUI that a new program started
         if self.on_program_started is not None:
@@ -335,13 +331,7 @@ class ProgramManager:
 
         prog.is_running = False
 
-        # Clean up PTY fd
-        if prog.pty_fd >= 0:
-            try:
-                os.close(prog.pty_fd)
-            except OSError:
-                pass
-            prog.pty_fd = -1
+        self._close_pty(prog)
 
         # Cancel read task
         task = self._read_tasks.pop(program_id, None)
@@ -366,9 +356,7 @@ class ProgramManager:
         """
         prog = self._get_program(program_id)
         if prog.owner_agent and prog.owner_agent != agent_id:
-            raise RuntimeError(
-                f"Program {program_id} is already owned by '{prog.owner_agent}'"
-            )
+            raise RuntimeError(f"Program {program_id} is already owned by '{prog.owner_agent}'")
         prog.owner_agent = agent_id
         logger.info("Agent %s adopted program %s", agent_id, program_id)
 
@@ -404,8 +392,7 @@ class ProgramManager:
         Sends SIGTERM then SIGKILL to each running process and closes PTY fds.
         Does not await anything — safe to call when no event loop is available.
         """
-        import time as _time
-
+        signaled = False
         for prog in self._programs.values():
             if not prog.is_running or prog.process is None:
                 continue
@@ -413,27 +400,20 @@ class ProgramManager:
                 continue
             try:
                 os.kill(prog.pid, signal.SIGTERM)
+                signaled = True
             except ProcessLookupError:
                 continue
 
-        # Brief wait for graceful exits
-        _time.sleep(0.5)
+        if signaled:
+            time.sleep(0.5)
 
         for prog in self._programs.values():
-            if prog.process is None:
-                continue
-            if prog.process.poll() is None:
+            if prog.process is not None and prog.process.poll() is None:
                 try:
                     os.kill(prog.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            # Clean up PTY fd
-            if prog.pty_fd >= 0:
-                try:
-                    os.close(prog.pty_fd)
-                except OSError:
-                    pass
-                prog.pty_fd = -1
+            self._close_pty(prog)
             prog.is_running = False
 
     # ------------------------------------------------------------------ #
@@ -447,16 +427,24 @@ class ProgramManager:
         except KeyError:
             raise KeyError(f"No program with id '{program_id}'") from None
 
+    @staticmethod
+    def _close_pty(prog: Program) -> None:
+        """Safely close and invalidate a program's PTY file descriptor."""
+        if prog.pty_fd >= 0:
+            try:
+                os.close(prog.pty_fd)
+            except OSError:
+                pass
+            prog.pty_fd = -1
+
     def _enforce_scrollback(self, prog: Program) -> None:
         """Trim output buffer to scrollback_limit and adjust cursors."""
-        if len(prog.output_buffer) > self.scrollback_limit:
-            excess = len(prog.output_buffer) - self.scrollback_limit
-            del prog.output_buffer[:excess]
-            # Adjust read cursors
-            for agent_id in prog.read_cursors:
-                prog.read_cursors[agent_id] = max(
-                    0, prog.read_cursors[agent_id] - excess
-                )
+        excess = len(prog.output_buffer) - self.scrollback_limit
+        if excess <= 0:
+            return
+        del prog.output_buffer[:excess]
+        for agent_id in prog.read_cursors:
+            prog.read_cursors[agent_id] = max(0, prog.read_cursors[agent_id] - excess)
 
     def _wake_event(self, program_id: str) -> None:
         """Notify any asyncio waiters that new output is available."""
@@ -521,13 +509,7 @@ class ProgramManager:
                 prog.process.poll()
             prog.is_running = False
 
-            # Clean up PTY fd
-            if prog.pty_fd >= 0:
-                try:
-                    os.close(prog.pty_fd)
-                except OSError:
-                    pass
-                prog.pty_fd = -1
+            self._close_pty(prog)
 
             # Wake any waiters so they see is_running=False
             event = self._output_events.get(prog.id)

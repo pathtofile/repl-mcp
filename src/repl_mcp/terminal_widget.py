@@ -54,23 +54,24 @@ def _char_style(char) -> Style:
     )
 
 
+_PYTE_COLOR_MAP = {
+    "black": "black",
+    "red": "red",
+    "green": "green",
+    "brown": "yellow",
+    "blue": "blue",
+    "magenta": "magenta",
+    "cyan": "cyan",
+    "white": "white",
+}
+
+
 def _pyte_color_to_rich(color: str) -> str | None:
     """Convert a pyte color value to a Rich color string."""
     if color == "default":
         return None
-    # Named colors
-    _MAP = {
-        "black": "black",
-        "red": "red",
-        "green": "green",
-        "brown": "yellow",
-        "blue": "blue",
-        "magenta": "magenta",
-        "cyan": "cyan",
-        "white": "white",
-    }
-    if color in _MAP:
-        return _MAP[color]
+    if color in _PYTE_COLOR_MAP:
+        return _PYTE_COLOR_MAP[color]
     # 256-color or hex
     if len(color) == 6:
         try:
@@ -228,9 +229,15 @@ class TerminalPane(Widget):
         self._refresh_needed: bool = False
         self._refresh_timer: Timer | None = None
 
+        # Cached widget references (set on mount)
+        self._scrollback_log: RichLog | None = None
+        self._screen_widget: Static | None = None
+
     def on_mount(self) -> None:
-        """Start the refresh timer once the widget is mounted."""
+        """Start the refresh timer and cache widget references."""
         self._refresh_timer = self.set_interval(_REFRESH_INTERVAL, self._tick_refresh)
+        self._scrollback_log = self.query_one(f"#scrollback-{self.program_id}", RichLog)
+        self._screen_widget = self.query_one(f"#screen-{self.program_id}", Static)
 
     def compose(self) -> ComposeResult:
         yield RichLog(
@@ -295,30 +302,20 @@ class TerminalPane(Widget):
     def _drain_scrollback(self) -> None:
         """Move lines from pyte's history buffer into the RichLog scrollback."""
         history_top: deque = self._screen.history.top
-        if not history_top:
-            return
-
-        try:
-            scrollback_log = self.query_one(f"#scrollback-{self.program_id}", RichLog)
-        except Exception:
+        if not history_top or self._scrollback_log is None:
             return
 
         while history_top:
             line_chars = history_top.popleft()
             rich_line = self._chars_to_rich_text(line_chars)
-            scrollback_log.write(rich_line)
+            self._scrollback_log.write(rich_line)
 
-        # Show the scrollback widget now that it has content
-        scrollback_log.add_class("has-content")
-
-        # Scrollback means rows shifted — invalidate cache
+        self._scrollback_log.add_class("has-content")
         self._row_cache.clear()
 
     def _do_refresh_screen(self, force_full: bool = False) -> None:
         """Render changed pyte screen rows to the Static widget."""
-        try:
-            screen_widget = self.query_one(f"#screen-{self.program_id}", Static)
-        except Exception:
+        if self._screen_widget is None:
             return
 
         screen = self._screen
@@ -347,23 +344,33 @@ class TerminalPane(Widget):
 
         dirty.clear()
 
-        # Assemble the full screen from cache
-        lines = [self._row_cache.get(r, Text("")).copy() for r in range(num_rows)]
+        _empty = Text("")
+
+        # Assemble the full screen from cache; only copy the cursor row
+        # since we mutate it with stylize/append below.
+        cursor = screen.cursor
+        cursor_row = cursor.y if self._is_alive else -1
+        lines = [
+            (
+                self._row_cache.get(r, _empty).copy()
+                if r == cursor_row
+                else self._row_cache.get(r, _empty)
+            )
+            for r in range(num_rows)
+        ]
 
         # Draw cursor: apply reverse style at cursor position
-        cursor = screen.cursor
-        if self._is_alive and 0 <= cursor.y < num_rows:
-            cursor_line = lines[cursor.y]
+        if 0 <= cursor_row < num_rows:
+            cursor_line = lines[cursor_row]
             col = cursor.x
             line_len = len(cursor_line.plain)
             if col < line_len:
                 cursor_line.stylize("reverse", col, col + 1)
             else:
-                # Cursor is past end of content — append a visible block
                 cursor_line.append(" ", style="reverse")
 
         combined = Text("\n").join(lines)
-        screen_widget.update(combined)
+        self._screen_widget.update(combined)
 
     @staticmethod
     def _chars_to_rich_text(line_chars: dict) -> Text:

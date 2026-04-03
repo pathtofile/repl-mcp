@@ -5,7 +5,7 @@ import logging
 from mcp.server.fastmcp import FastMCP, Context
 
 from .manager import ProgramManager
-from .auth import BearerAuthMiddleware, generate_token
+from .auth import BearerAuthMiddleware
 
 logger = logging.getLogger(__name__)
 
