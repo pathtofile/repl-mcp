@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import shlex
 
 from textual.app import App, ComposeResult
+from textual.events import Paste
 from textual.screen import ModalScreen
 from textual.widgets import (
     Header,
@@ -361,6 +362,45 @@ class ReplMCPApp(App):
             )
         except Exception as e:
             self.notify(f"Error sending input: {e}", severity="error")
+
+    async def on_paste(self, event: Paste) -> None:
+        """Handle paste events — send pasted text directly to the active program.
+
+        Multi-line paste is sent line-by-line so the REPL processes each line.
+        Single-line paste is also forwarded to keep the behavior consistent
+        with a real terminal (paste goes straight to the program).
+        """
+        if not self._active_program_id or not self.manager:
+            return
+
+        # Only intercept paste when the main screen is active (not a modal)
+        if self.screen is not self.screen_stack[0]:
+            return
+
+        prog = self.manager.programs.get(self._active_program_id)
+        if not prog or not prog.is_running:
+            return
+
+        event.prevent_default()
+        event.stop()
+
+        text = event.text
+        if not text:
+            return
+
+        # Send each line to the program, preserving multi-line paste behavior
+        lines = text.split("\n")
+        for line in lines:
+            try:
+                await self.manager.send_input(
+                    self._active_program_id,
+                    line,
+                    source="human",
+                    agent_id="human",
+                )
+            except Exception as e:
+                self.notify(f"Error sending pasted input: {e}", severity="error")
+                break
 
     def _update_status(self) -> None:
         """Update the status bar counts."""
