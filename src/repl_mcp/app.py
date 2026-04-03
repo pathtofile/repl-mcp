@@ -457,25 +457,6 @@ class ReplMCPApp(App):
 
         self.push_screen(NewProgramScreen(), callback=_on_result)
 
-    def on_key(self, event) -> None:
-        """PgUp/PgDown scroll the active log; any other key snaps back to bottom."""
-        # Don't interfere with modal screens
-        if self.screen is not self.screen_stack[0]:
-            return
-        if not self._active_program_id:
-            return
-        try:
-            log = self.query_one(f"#log-{self._active_program_id}", RichLog)
-        except NoMatches:
-            return
-
-        if event.key == "pageup":
-            log.scroll_page_up(animate=False)
-        elif event.key == "pagedown":
-            log.scroll_page_down(animate=False)
-        else:
-            log.scroll_end(animate=False)
-
     def action_focus_input(self) -> None:
         """Focus the input bar."""
         self.query_one("#input-bar", Input).focus()

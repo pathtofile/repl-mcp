@@ -221,6 +221,9 @@ class TerminalPane(Widget):
         # Row render cache: row index -> rendered Rich Text
         self._row_cache: dict[int, Text] = {}
 
+        # Track previous cursor position so we can re-render the old row
+        self._prev_cursor: tuple[int, int] = (0, 0)
+
         # Debounce: coalesce rapid feed() calls into one render per frame
         self._refresh_needed: bool = False
         self._refresh_timer: Timer | None = None
@@ -321,6 +324,16 @@ class TerminalPane(Widget):
         screen = self._screen
         dirty = screen.dirty
         num_rows = screen.lines
+
+        # Always re-render rows affected by cursor movement so the cursor
+        # block appears in the correct position and disappears from the old one.
+        prev_y, _ = self._prev_cursor
+        cur_y = screen.cursor.y
+        if 0 <= prev_y < num_rows:
+            dirty.add(prev_y)
+        if 0 <= cur_y < num_rows:
+            dirty.add(cur_y)
+        self._prev_cursor = (cur_y, screen.cursor.x)
 
         if force_full or not self._row_cache:
             # Full render — build all rows
