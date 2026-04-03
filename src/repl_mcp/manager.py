@@ -9,6 +9,7 @@ import pty
 import signal
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Callable
@@ -33,6 +34,22 @@ PTY_READ_SIZE = 4096
 EAGAIN_RETRY_DELAY = 0.05
 KILL_POLL_INTERVAL = 0.1
 KILL_POLL_ITERATIONS = 20
+
+# ioctl constant to set the controlling terminal.
+# Required so programs like ssh can open /dev/tty for password prompts.
+if sys.platform == "darwin":
+    TIOCSCTTY = 0x20007461
+else:
+    TIOCSCTTY = 0x540E
+
+
+def _set_controlling_tty() -> None:
+    """preexec_fn: make stdin (the slave PTY) the controlling terminal.
+
+    By the time subprocess calls this, setsid() and dup2(slave_fd, 0)
+    have already happened, so fd 0 is the slave PTY in a new session.
+    """
+    fcntl.ioctl(0, TIOCSCTTY, 0)
 
 
 class ProgramManager:
@@ -124,6 +141,7 @@ class ProgramManager:
                 stdout=slave_fd,
                 stderr=slave_fd,
                 start_new_session=True,
+                preexec_fn=_set_controlling_tty,
                 cwd=cwd,
                 env=proc_env,
             )

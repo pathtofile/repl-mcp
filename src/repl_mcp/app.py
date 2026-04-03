@@ -402,7 +402,7 @@ class ReplMCPApp(App):
         event.prevent_default()
         event.stop()
 
-        text = event.text
+        text = event.text.rstrip("\n")
         if not text:
             return
 
