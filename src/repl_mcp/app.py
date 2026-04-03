@@ -258,7 +258,8 @@ class ReplMCPApp(App):
 
     async def _launch_startup_procs(self) -> None:
         """Launch programs specified via --startup-procs or -- command line args."""
-        for proc in self._startup_procs:
+
+        async def _start_one(proc: dict) -> None:
             try:
                 await self.manager.start_program(
                     command=proc["command"],
@@ -271,6 +272,8 @@ class ReplMCPApp(App):
                 self.notify(
                     f"Failed to start {proc['command']}: {exc}", severity="error"
                 )
+
+        await asyncio.gather(*[_start_one(p) for p in self._startup_procs])
 
     async def _check_idle_programs(self) -> None:
         """Periodically check for idle programs and update tab indicators."""

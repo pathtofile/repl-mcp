@@ -34,6 +34,7 @@ PTY_READ_SIZE = 4096
 EAGAIN_RETRY_DELAY = 0.05
 KILL_POLL_INTERVAL = 0.1
 KILL_POLL_ITERATIONS = 20
+INITIAL_INPUT_DELAY = 1.0
 
 # ioctl constant to set the controlling terminal.
 # Required so programs like ssh can open /dev/tty for password prompts.
@@ -82,7 +83,9 @@ class ProgramManager:
                 if os.path.isfile(real):
                     resolved.add(real)
                 else:
-                    logger.warning("Allowlist entry '%s' could not be resolved; skipping", name)
+                    logger.warning(
+                        "Allowlist entry '%s' could not be resolved; skipping", name
+                    )
         self._allowlist = resolved
 
     def _check_allowlist(self, resolved_path: str) -> None:
@@ -91,7 +94,9 @@ class ProgramManager:
             return
         if resolved_path not in self._allowlist:
             logger.warning(
-                "Blocked program '%s' (allowlist: %s)", resolved_path, sorted(self._allowlist)
+                "Blocked program '%s' (allowlist: %s)",
+                resolved_path,
+                sorted(self._allowlist),
             )
             raise ValueError(f"Program '{resolved_path}' is not in the allowlist.")
 
@@ -183,7 +188,9 @@ class ProgramManager:
         task = asyncio.create_task(self._read_loop(prog))
         self._read_tasks[prog.id] = task
 
-        logger.info("Started program %s (pid=%d, cmd=%s)", prog.id, prog.pid, resolved_command)
+        logger.info(
+            "Started program %s (pid=%d, cmd=%s)", prog.id, prog.pid, resolved_command
+        )
 
         # Notify TUI that a new program started
         if self.on_program_started is not None:
@@ -192,12 +199,19 @@ class ProgramManager:
             except Exception:
                 logger.exception("on_program_started callback error")
 
-        # Send initial input if provided (e.g. for typing a password on startup)
+        # Send initial input after a brief delay so the program can show its prompt
         if initial_input:
-            await asyncio.sleep(0.1)  # brief delay to let the program initialize
-            await self.send_input(prog.id, initial_input, source="initial")
+            asyncio.create_task(self._send_initial_input(prog.id, initial_input))
 
         return {"id": prog.id, "pid": prog.pid, "command": resolved_command}
+
+    async def _send_initial_input(self, program_id: str, text: str) -> None:
+        """Send initial input to a program after a brief startup delay."""
+        await asyncio.sleep(INITIAL_INPUT_DELAY)
+        try:
+            await self.send_input(program_id, text, source="initial")
+        except Exception:
+            logger.exception("Failed to send initial input to %s", program_id)
 
     async def send_input(
         self,
@@ -352,7 +366,9 @@ class ProgramManager:
         """
         prog = self._get_program(program_id)
         if prog.owner_agent and prog.owner_agent != agent_id:
-            raise RuntimeError(f"Program {program_id} is already owned by '{prog.owner_agent}'")
+            raise RuntimeError(
+                f"Program {program_id} is already owned by '{prog.owner_agent}'"
+            )
         prog.owner_agent = agent_id
         logger.info("Agent %s adopted program %s", agent_id, program_id)
 
@@ -438,7 +454,9 @@ class ProgramManager:
             del prog.output_buffer[:excess]
             # Adjust read cursors
             for agent_id in prog.read_cursors:
-                prog.read_cursors[agent_id] = max(0, prog.read_cursors[agent_id] - excess)
+                prog.read_cursors[agent_id] = max(
+                    0, prog.read_cursors[agent_id] - excess
+                )
 
     def _wake_event(self, program_id: str) -> None:
         """Notify any asyncio waiters that new output is available."""
