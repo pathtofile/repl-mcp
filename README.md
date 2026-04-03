@@ -85,12 +85,30 @@ repl-mcp --host 0.0.0.0 --port 9000 --token secret --allow python bash --scrollb
 | `--generate-token` | — | Print a random token and exit |
 | `--allow PROGRAM...` | all allowed | Restrict which programs agents can start |
 | `--scrollback LINES` | `10000` | Max output lines kept per program |
+| `--startup-procs FILE` | none | YAML file listing programs to launch at startup |
+
+#### Startup procs file
+
+The `--startup-procs` file is a YAML list of programs to launch when repl-mcp starts. Each entry has a `command` (a full command line, split with shell rules) and optional `cwd`, `env`, and `initial_input` fields:
+
+```yaml
+- command: python -i
+  cwd: /path/to/project
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+
+- command: ssh user@host
+  initial_input: my-password
+
+- command: node server/server.js 192.168.1.180 4455 --log-file
+  cwd: /path/to/nodeshell
+```
 
 ### TUI Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+N` | Start a new program (with optional working dir and env vars) |
+| `Ctrl+N` | Start a new program (with optional working dir, env vars, and initial input) |
 | `Ctrl+T` | Focus the input bar |
 | `Ctrl+C` | Copy active program's unique ID to clipboard |
 | `Ctrl+Q` | Quit |
@@ -155,9 +173,12 @@ Start a new interactive program in a PTY.
   "command": "python",
   "args": ["-i"],
   "cwd": "/path/to/project",
-  "env": {"PYTHONDONTWRITEBYTECODE": "1"}
+  "env": {"PYTHONDONTWRITEBYTECODE": "1"},
+  "initial_input": "import os"
 }
 ```
+
+The optional `initial_input` field sends text to the program immediately after it starts — useful for automatically typing passwords, setup commands, etc.
 
 Returns: `{ "id": "bewildered-spectacles", "pid": 1234, "command": "/usr/bin/python" }`
 

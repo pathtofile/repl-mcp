@@ -106,6 +106,7 @@ class ProgramManager:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         owner_agent: str = "",
+        initial_input: str | None = None,
     ) -> dict:
         """Start a new interactive program in a PTY.
 
@@ -190,6 +191,11 @@ class ProgramManager:
                 self.on_program_started(prog)
             except Exception:
                 logger.exception("on_program_started callback error")
+
+        # Send initial input if provided (e.g. for typing a password on startup)
+        if initial_input:
+            await asyncio.sleep(0.1)  # brief delay to let the program initialize
+            await self.send_input(prog.id, initial_input, source="initial")
 
         return {"id": prog.id, "pid": prog.pid, "command": resolved_command}
 

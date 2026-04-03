@@ -131,6 +131,15 @@ class NewProgramScreen(ModalScreen[dict | None]):
                 id="new-program-env",
                 classes="field-input",
             )
+            yield Static(
+                "Initial input (optional, sent on startup e.g. password):",
+                classes="field-label",
+            )
+            yield Input(
+                placeholder="text to type into program",
+                id="new-program-initial-input",
+                classes="field-input",
+            )
 
     def on_mount(self) -> None:
         self.query_one("#new-program-command", Input).focus()
@@ -149,7 +158,10 @@ class NewProgramScreen(ModalScreen[dict | None]):
                 if "=" in part:
                     key, _, val = part.partition("=")
                     env[key] = val
-        self.dismiss({"command": command, "cwd": cwd, "env": env})
+        initial_input = (
+            self.query_one("#new-program-initial-input", Input).value.strip() or None
+        )
+        self.dismiss({"command": command, "cwd": cwd, "env": env, "initial_input": initial_input})
 
     def on_key(self, event) -> None:
         if event.key == "escape":
@@ -253,6 +265,7 @@ class ReplMCPApp(App):
                     args=proc.get("args"),
                     cwd=proc.get("cwd"),
                     env=proc.get("env"),
+                    initial_input=proc.get("initial_input"),
                 )
             except Exception as exc:
                 self.notify(
@@ -450,6 +463,7 @@ class ReplMCPApp(App):
                     cwd=result_dict.get("cwd"),
                     env=result_dict.get("env"),
                     owner_agent="",
+                    initial_input=result_dict.get("initial_input"),
                 )
                 self.notify(f"Started {command} as [{result['id']}]")
             except Exception as e:

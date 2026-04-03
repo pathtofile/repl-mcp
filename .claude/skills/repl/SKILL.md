@@ -22,6 +22,12 @@ Use `start_program` to launch an interactive program:
 
 Returns a program `id` (a human-readable name like `bewildered-spectacles`) you'll use for all subsequent interactions. The command is resolved to an absolute path and checked against the allowlist (if configured).
 
+You can also pass `initial_input` to automatically send text to the program right after it starts — useful for passwords, setup commands, or any input the program will prompt for immediately:
+
+```json
+{ "command": "ssh", "args": ["user@host"], "initial_input": "my-password" }
+```
+
 ### Sending Input
 
 Use `send_input` to type into the program:

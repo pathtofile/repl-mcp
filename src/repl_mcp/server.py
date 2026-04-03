@@ -60,6 +60,7 @@ class ReplMCPServer:
             args: list[str] | None = None,
             cwd: str | None = None,
             env: dict[str, str] | None = None,
+            initial_input: str | None = None,
         ) -> dict:
             """Start a new interactive program in a PTY.
 
@@ -68,6 +69,7 @@ class ReplMCPServer:
                 args: Additional arguments
                 cwd: Working directory (default: server's cwd)
                 env: Additional environment variables
+                initial_input: Text to send to the program immediately after it starts
             """
             agent_label = self._get_agent_label(ctx)
             return await self.manager.start_program(
@@ -76,6 +78,7 @@ class ReplMCPServer:
                 cwd=cwd,
                 env=env or {},
                 owner_agent=agent_label,
+                initial_input=initial_input,
             )
 
         @self.mcp.tool()

@@ -1,8 +1,10 @@
 """Entry point for repl-mcp."""
 
 import argparse
-import json
+import shlex
 import sys
+
+import yaml
 
 from .auth import generate_token
 from .manager import ProgramManager
@@ -58,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         metavar="FILE",
-        help="Path to a JSON file listing programs to launch at startup",
+        help="Path to a YAML file listing programs to launch at startup",
     )
     parser.add_argument(
         "command",
@@ -69,21 +71,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _load_startup_procs(path: str) -> list[dict]:
-    """Load and validate startup procs from a JSON file.
+    """Load and validate startup procs from a YAML file.
 
-    Expected format: a JSON array of objects, each with at least a "command" key,
-    and optional "args", "cwd", and "env" keys.
+    Expected format: a YAML list of mappings, each with at least a "command" key
+    (a full shell command line), and optional "cwd", "env", and "initial_input" keys.
+    The "command" string is split using shlex.split into command + args.
     """
     with open(path) as f:
-        data = json.load(f)
+        data = yaml.safe_load(f)
     if not isinstance(data, list):
-        raise ValueError(f"--startup-procs file must contain a JSON array, got {type(data).__name__}")
+        raise ValueError(
+            f"--startup-procs file must contain a YAML list, got {type(data).__name__}"
+        )
+    procs = []
     for i, entry in enumerate(data):
         if not isinstance(entry, dict) or "command" not in entry:
             raise ValueError(
-                f"Entry {i} in --startup-procs must be an object with a \"command\" key"
+                f"Entry {i} in --startup-procs must be a mapping with a \"command\" key"
             )
-    return data
+        parts = shlex.split(entry["command"])
+        if not parts:
+            raise ValueError(f"Entry {i} in --startup-procs has an empty \"command\"")
+        proc = {"command": parts[0], "args": parts[1:]}
+        for key in ("cwd", "env", "initial_input"):
+            if key in entry:
+                proc[key] = entry[key]
+        procs.append(proc)
+    return procs
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -103,7 +117,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.startup_procs:
         try:
             startup_procs.extend(_load_startup_procs(args.startup_procs))
-        except (json.JSONDecodeError, ValueError, OSError) as exc:
+        except (yaml.YAMLError, ValueError, OSError) as exc:
             print(f"Error loading --startup-procs: {exc}", file=sys.stderr)
             sys.exit(1)
 

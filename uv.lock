@@ -928,11 +928,12 @@ wheels = [
 
 [[package]]
 name = "repl-mcp"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },
     { name = "pyte" },
+    { name = "pyyaml" },
     { name = "textual" },
     { name = "unique-namer" },
     { name = "uvicorn" },
@@ -956,6 +957,7 @@ requires-dist = [
     { name = "pyte" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
+    { name = "pyyaml" },
     { name = "textual" },
     { name = "unique-namer" },
     { name = "uvicorn" },
