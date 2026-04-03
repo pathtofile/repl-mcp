@@ -225,10 +225,11 @@ class TerminalPane(Widget):
 
         # Debounce: coalesce rapid feed() calls into one render per frame
         self._refresh_needed: bool = False
+        self._scrollback_dirty: bool = False
         self._refresh_timer: Timer | None = None
 
-        # Scrollback lines stored as Rich Text objects
-        self._scrollback_lines: list[Text] = []
+        # Scrollback lines stored as Rich Text objects (auto-trims to limit)
+        self._scrollback_lines: deque[Text] = deque(maxlen=scrollback)
 
         # Cached widget references (set on mount)
         self._scrollback_widget: Static | None = None
@@ -294,15 +295,22 @@ class TerminalPane(Widget):
     # ------------------------------------------------------------------ #
 
     def _tick_refresh(self) -> None:
-        """Timer callback: render if there's pending output."""
+        """Timer callback: render scrollback and screen together in one frame."""
+        if not self._refresh_needed and not self._scrollback_dirty:
+            return
+
+        if self._scrollback_dirty:
+            self._scrollback_dirty = False
+            self._flush_scrollback_widget()
+
         if self._refresh_needed:
             self._refresh_needed = False
             self._do_refresh_screen()
 
     def _drain_scrollback(self) -> None:
-        """Move lines from pyte's history buffer into the scrollback Static."""
+        """Move lines from pyte's history buffer into the internal list (debounced)."""
         history_top: deque = self._screen.history.top
-        if not history_top or self._scrollback_widget is None:
+        if not history_top:
             return
 
         while history_top:
@@ -310,17 +318,19 @@ class TerminalPane(Widget):
             rich_line = self._chars_to_rich_text(line_chars)
             self._scrollback_lines.append(rich_line)
 
-        # Trim to scrollback limit
-        if len(self._scrollback_lines) > self._scrollback:
-            self._scrollback_lines = self._scrollback_lines[-self._scrollback:]
+        self._scrollback_dirty = True
+
+    def _flush_scrollback_widget(self) -> None:
+        """Update the scrollback Static widget (called from tick)."""
+        if not self._scrollback_widget or not self._scrollback_lines:
+            return
 
         combined = Text("\n").join(self._scrollback_lines)
         self._scrollback_widget.update(combined)
-        self._row_cache.clear()
 
         # Auto-scroll to bottom
         if self._scroll_container:
-            self.call_after_refresh(self._scroll_container.scroll_end, animate=False)
+            self._scroll_container.scroll_end(animate=False)
 
     def _do_refresh_screen(self, force_full: bool = False) -> None:
         """Render changed pyte screen rows to the Static widget."""
