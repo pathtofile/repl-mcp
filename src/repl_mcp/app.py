@@ -21,7 +21,6 @@ from textual.widgets import (
 )
 from textual.reactive import reactive
 from textual.css.query import NoMatches
-from rich.text import Text
 
 from .manager import ProgramManager
 from .models import Program
@@ -42,11 +41,11 @@ def _program_display_name(command: str) -> str:
     return command.split("/")[-1].split()[0]
 
 
-def _build_tab_label(prog: Program, icon: str) -> Text:
+def _build_tab_label(prog: Program, icon: str) -> str:
     """Build a formatted tab label for a program."""
     name = _program_display_name(prog.command)
     agent_info = f" ({prog.owner_agent})" if prog.owner_agent else ""
-    return Text(f"{icon} {name} [{prog.id}]{agent_info}")
+    return f"{icon} {name} [{prog.id}]{agent_info}"
 
 
 class ProgramTab(TabPane):

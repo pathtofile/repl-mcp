@@ -11,9 +11,10 @@ from collections import deque
 import pyte
 from rich.style import Style
 from rich.text import Text
+from textual.containers import VerticalScroll
 from textual.events import Key, Resize
 from textual.timer import Timer
-from textual.widgets import RichLog, Static
+from textual.widgets import Static
 from textual.widget import Widget
 from textual.app import ComposeResult
 
@@ -179,22 +180,19 @@ class TerminalPane(Widget):
     DEFAULT_CSS = """
     TerminalPane {
         height: 1fr;
-        layout: vertical;
     }
 
-    TerminalPane RichLog {
-        height: auto;
-        max-height: 50%;
+    TerminalPane .terminal-scroll {
+        height: 1fr;
         scrollbar-size: 1 1;
-        display: none;
     }
 
-    TerminalPane RichLog.has-content {
-        display: block;
+    TerminalPane .scrollback {
+        height: auto;
     }
 
     TerminalPane .terminal-screen {
-        height: 1fr;
+        height: auto;
     }
     """
 
@@ -229,23 +227,25 @@ class TerminalPane(Widget):
         self._refresh_needed: bool = False
         self._refresh_timer: Timer | None = None
 
+        # Scrollback lines stored as Rich Text objects
+        self._scrollback_lines: list[Text] = []
+
         # Cached widget references (set on mount)
-        self._scrollback_log: RichLog | None = None
+        self._scrollback_widget: Static | None = None
         self._screen_widget: Static | None = None
+        self._scroll_container: VerticalScroll | None = None
 
     def on_mount(self) -> None:
         """Start the refresh timer and cache widget references."""
         self._refresh_timer = self.set_interval(_REFRESH_INTERVAL, self._tick_refresh)
-        self._scrollback_log = self.query_one(f"#scrollback-{self.program_id}", RichLog)
+        self._scrollback_widget = self.query_one(f"#scrollback-{self.program_id}", Static)
         self._screen_widget = self.query_one(f"#screen-{self.program_id}", Static)
+        self._scroll_container = self.query_one(f"#scroll-{self.program_id}", VerticalScroll)
 
     def compose(self) -> ComposeResult:
-        yield RichLog(
-            id=f"scrollback-{self.program_id}",
-            wrap=False,
-            max_lines=self._scrollback,
-        )
-        yield Static("", id=f"screen-{self.program_id}", classes="terminal-screen")
+        with VerticalScroll(id=f"scroll-{self.program_id}", classes="terminal-scroll"):
+            yield Static("", id=f"scrollback-{self.program_id}", classes="scrollback")
+            yield Static("", id=f"screen-{self.program_id}", classes="terminal-screen")
 
     def feed(self, data: str) -> None:
         """Feed raw PTY output into the terminal emulator. Rendering is debounced."""
@@ -300,18 +300,27 @@ class TerminalPane(Widget):
             self._do_refresh_screen()
 
     def _drain_scrollback(self) -> None:
-        """Move lines from pyte's history buffer into the RichLog scrollback."""
+        """Move lines from pyte's history buffer into the scrollback Static."""
         history_top: deque = self._screen.history.top
-        if not history_top or self._scrollback_log is None:
+        if not history_top or self._scrollback_widget is None:
             return
 
         while history_top:
             line_chars = history_top.popleft()
             rich_line = self._chars_to_rich_text(line_chars)
-            self._scrollback_log.write(rich_line)
+            self._scrollback_lines.append(rich_line)
 
-        self._scrollback_log.add_class("has-content")
+        # Trim to scrollback limit
+        if len(self._scrollback_lines) > self._scrollback:
+            self._scrollback_lines = self._scrollback_lines[-self._scrollback:]
+
+        combined = Text("\n").join(self._scrollback_lines)
+        self._scrollback_widget.update(combined)
         self._row_cache.clear()
+
+        # Auto-scroll to bottom
+        if self._scroll_container:
+            self.call_after_refresh(self._scroll_container.scroll_end, animate=False)
 
     def _do_refresh_screen(self, force_full: bool = False) -> None:
         """Render changed pyte screen rows to the Static widget."""
