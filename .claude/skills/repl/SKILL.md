@@ -8,7 +8,7 @@ argument-hint: "[task description]"
 
 You have access to a repl-mcp server that manages interactive REPL programs in real PTYs. A human operator is watching the TUI and can intervene at any time.
 
-The MCP server is running at `http://127.0.0.1:8780/mcp` (default) and exposes the tools below.
+The MCP server is running at `http://127.0.0.1:2222/mcp` (default) and exposes the tools below.
 
 ## Available MCP Tools
 

@@ -26,7 +26,7 @@ class TestServerInit:
         manager = ProgramManager()
         server = ReplMCPServer(manager=manager)
         assert server.host == "127.0.0.1"
-        assert server.port == 8780
+        assert server.port == 2222
 
     def test_custom_host_port(self):
         manager = ProgramManager()

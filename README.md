@@ -14,7 +14,7 @@ A TUI application and MCP server that lets AI agents start, interact with, and m
 │  ┌──────────────┐                  │             │
 │  │  MCP HTTP    │◄─────────────────┘             │
 │  │  Server      │  Streamable HTTP               │
-│  │  (AI I/O)    │  port 8780 (configurable)      │
+│  │  (AI I/O)    │  port 2222 (configurable)      │
 │  └──────────────┘                                │
 └─────────────────────────────────────────────────┘
          │
@@ -56,7 +56,7 @@ pip install -e ".[dev]"
 ### Basic
 
 ```bash
-# Start with defaults (port 8780, no auth)
+# Start with defaults (port 2222, no auth)
 repl-mcp
 
 # Custom port
@@ -79,7 +79,7 @@ repl-mcp --host 0.0.0.0 --port 9000 --token secret --allow python bash --scrollb
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--port PORT` | `8780` | Port for the MCP HTTP server |
+| `--port PORT` | `2222` | Port for the MCP HTTP server |
 | `--host HOST` | `127.0.0.1` | Host to bind to |
 | `--token TOKEN` | none | Bearer token for authentication |
 | `--generate-token` | — | Print a random token and exit |
@@ -125,7 +125,7 @@ Add repl-mcp to your Claude Code MCP settings. You can configure it at the proje
   "mcpServers": {
     "repl-mcp": {
       "type": "url",
-      "url": "http://127.0.0.1:8780/mcp"
+      "url": "http://127.0.0.1:2222/mcp"
     }
   }
 }
@@ -138,7 +138,7 @@ With bearer token authentication:
   "mcpServers": {
     "repl-mcp": {
       "type": "url",
-      "url": "http://127.0.0.1:8780/mcp",
+      "url": "http://127.0.0.1:2222/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN_HERE"
       }
@@ -150,12 +150,12 @@ With bearer token authentication:
 You can also add it via the CLI:
 
 ```bash
-claude mcp add repl-mcp --transport http http://127.0.0.1:8780/mcp
+claude mcp add repl-mcp --transport http http://127.0.0.1:2222/mcp
 ```
 
 ### Connecting Other MCP Clients
 
-The MCP server exposes a Streamable HTTP endpoint at `http://127.0.0.1:8780/mcp` (or your custom host/port). Any MCP-compatible client can connect using the Streamable HTTP transport.
+The MCP server exposes a Streamable HTTP endpoint at `http://127.0.0.1:2222/mcp` (or your custom host/port). Any MCP-compatible client can connect using the Streamable HTTP transport.
 
 For clients that require manual configuration, the key details are:
 - **Transport**: Streamable HTTP

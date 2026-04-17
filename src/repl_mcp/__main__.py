@@ -21,8 +21,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--port",
         type=int,
-        default=8780,
-        help="Port to listen on (default: 8780)",
+        default=2222,
+        help="Port to listen on (default: 2222)",
     )
     parser.add_argument(
         "--host",
@@ -86,7 +86,9 @@ def _load_startup_procs(path: str) -> list[dict]:
     procs = []
     for i, entry in enumerate(data):
         if not isinstance(entry, dict) or "command" not in entry:
-            raise ValueError(f'Entry {i} in --startup-procs must be a mapping with a "command" key')
+            raise ValueError(
+                f'Entry {i} in --startup-procs must be a mapping with a "command" key'
+            )
         parts = shlex.split(entry["command"])
         if not parts:
             raise ValueError(f'Entry {i} in --startup-procs has an empty "command"')

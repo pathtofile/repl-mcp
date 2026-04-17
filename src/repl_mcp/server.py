@@ -17,7 +17,7 @@ class ReplMCPServer:
         self,
         manager: ProgramManager,
         host: str = "127.0.0.1",
-        port: int = 8780,
+        port: int = 2222,
         token: str | None = None,
     ):
         self.manager = manager
@@ -88,7 +88,9 @@ class ReplMCPServer:
                 input: Text to send (newline appended if not present)
             """
             agent_label = self._get_agent_label(ctx)
-            return await self.manager.send_input(id, input, source="ai", agent_id=agent_label)
+            return await self.manager.send_input(
+                id, input, source="ai", agent_id=agent_label
+            )
 
         @self.mcp.tool()
         async def send_signal(id: str, signal: str, ctx: Context) -> dict:
@@ -111,7 +113,9 @@ class ReplMCPServer:
                 timeout: Max seconds to wait for new output (default: 0, instant return)
             """
             agent_label = self._get_agent_label(ctx)
-            return await self.manager.read_output(id, agent_id=agent_label, timeout=timeout)
+            return await self.manager.read_output(
+                id, agent_id=agent_label, timeout=timeout
+            )
 
         @self.mcp.tool()
         async def list_programs() -> list[dict]:
@@ -138,7 +142,11 @@ class ReplMCPServer:
         # many MCP clients don't follow).  Must pass through lifespan events
         # unchanged so the MCP session manager initializes correctly.
         async def strip_trailing_slash(scope, receive, send):
-            if scope["type"] == "http" and scope["path"].endswith("/") and scope["path"] != "/":
+            if (
+                scope["type"] == "http"
+                and scope["path"].endswith("/")
+                and scope["path"] != "/"
+            ):
                 scope = dict(scope, path=scope["path"].rstrip("/"))
             await inner(scope, receive, send)
 
@@ -165,7 +173,9 @@ class ReplMCPServer:
         try:
             await server.serve()
         except Exception:
-            logger.exception("MCP server failed to start on %s:%s", self.host, self.port)
+            logger.exception(
+                "MCP server failed to start on %s:%s", self.host, self.port
+            )
             raise
 
     def get_starlette_app(self):  # -> ASGI app callable

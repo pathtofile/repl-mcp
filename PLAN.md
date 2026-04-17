@@ -18,7 +18,7 @@ A Python TUI application and MCP server that lets AI agents start, interact with
 │  ┌──────────────┐                  │             │
 │  │  MCP HTTP    │◄─────────────────┘             │
 │  │  Server      │  Streamable HTTP               │
-│  │  (AI I/O)    │  port 8780 (configurable)      │
+│  │  (AI I/O)    │  port 2222 (configurable)      │
 │  └──────────────┘                                │
 └─────────────────────────────────────────────────┘
          │
@@ -31,7 +31,7 @@ A Python TUI application and MCP server that lets AI agents start, interact with
 - **Single process**: TUI and HTTP MCP server run together in the same async event loop.
 - **Streamable HTTP transport**: Modern MCP transport over HTTP with optional SSE streaming.
 - **Full PTY**: Each managed program gets a pseudo-terminal for correct interactive behavior (prompts, colors, Ctrl+C, etc.).
-- **Default port 8780**, overridable via `--port` CLI flag.
+- **Default port 2222**, overridable via `--port` CLI flag.
 
 ---
 
@@ -177,7 +177,7 @@ Sends SIGTERM, waits briefly, then SIGKILL if needed.
 repl-mcp [OPTIONS]
 
 Options:
-  --port PORT            HTTP port to listen on (default: 8780)
+  --port PORT            HTTP port to listen on (default: 2222)
   --allow PROGRAM...     Allowlist of programs that can be started (by name)
   --token TOKEN          Require this bearer token for MCP auth
   --generate-token       Auto-generate and display a bearer token

@@ -66,13 +66,15 @@ class ProgramTab(TabPane):
 class StatusBar(Static):
     """Bottom status bar showing server info."""
 
-    port: reactive[int] = reactive(8780)
+    port: reactive[int] = reactive(2222)
     agent_count: reactive[int] = reactive(0)
     program_count: reactive[int] = reactive(0)
     token_display: reactive[str] = reactive("")
 
     def render(self) -> str:
-        token_info = f" | Token: {self.token_display}" if self.token_display else " | No auth"
+        token_info = (
+            f" | Token: {self.token_display}" if self.token_display else " | No auth"
+        )
         return (
             f"  Port: {self.port}{token_info}"
             f" | Agents: {self.agent_count}"
@@ -113,14 +115,18 @@ class NewProgramScreen(ModalScreen[dict | None]):
 
     def compose(self) -> ComposeResult:
         with Static(id="new-program-dialog"):
-            yield Static("Command (e.g. python3, gdb ./a.out):", classes="field-label-first")
+            yield Static(
+                "Command (e.g. python3, gdb ./a.out):", classes="field-label-first"
+            )
             yield Input(
                 placeholder="command [args...]",
                 id="new-program-command",
                 classes="field-input",
             )
             yield Static("Working directory (optional):", classes="field-label")
-            yield Input(placeholder="/path/to/dir", id="new-program-cwd", classes="field-input")
+            yield Input(
+                placeholder="/path/to/dir", id="new-program-cwd", classes="field-input"
+            )
             yield Static(
                 "Environment variables (optional, KEY=VAL KEY2=VAL2):",
                 classes="field-label",
@@ -157,8 +163,12 @@ class NewProgramScreen(ModalScreen[dict | None]):
                 if "=" in part:
                     key, _, val = part.partition("=")
                     env[key] = val
-        initial_input = self.query_one("#new-program-initial-input", Input).value.strip() or None
-        self.dismiss({"command": command, "cwd": cwd, "env": env, "initial_input": initial_input})
+        initial_input = (
+            self.query_one("#new-program-initial-input", Input).value.strip() or None
+        )
+        self.dismiss(
+            {"command": command, "cwd": cwd, "env": env, "initial_input": initial_input}
+        )
 
     def on_key(self, event) -> None:
         if event.key == "escape":
@@ -205,7 +215,7 @@ class ReplMCPApp(App):
         self,
         manager: ProgramManager | None = None,
         server=None,
-        port: int = 8780,
+        port: int = 2222,
         token: str | None = None,
         scrollback: int = 10000,
         startup_procs: list[dict] | None = None,
@@ -266,7 +276,9 @@ class ReplMCPApp(App):
                     initial_input=proc.get("initial_input"),
                 )
             except Exception as exc:
-                self.notify(f"Failed to start {proc['command']}: {exc}", severity="error")
+                self.notify(
+                    f"Failed to start {proc['command']}: {exc}", severity="error"
+                )
 
         await asyncio.gather(*[_start_one(p) for p in self._startup_procs])
 
@@ -356,11 +368,15 @@ class ReplMCPApp(App):
 
         self._update_status()
 
-    def _on_program_output(self, program_id: str, text: str, source: str = "program") -> None:
+    def _on_program_output(
+        self, program_id: str, text: str, source: str = "program"
+    ) -> None:
         """Called when new output is available (from async tasks on the main thread)."""
         self.call_later(self._append_output, program_id, text, source)
 
-    def _append_output(self, program_id: str, text: str, source: str = "program") -> None:
+    def _append_output(
+        self, program_id: str, text: str, source: str = "program"
+    ) -> None:
         """Feed output to the program's terminal emulator (runs on main thread)."""
         try:
             terminal = self.query_one(f"#terminal-{program_id}", TerminalPane)
@@ -369,13 +385,17 @@ class ReplMCPApp(App):
 
         terminal.feed(text)
 
-    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+    def on_tabbed_content_tab_activated(
+        self, event: TabbedContent.TabActivated
+    ) -> None:
         """Track which program tab is currently active and focus its terminal."""
         tab_id = event.pane.id or ""
         if tab_id.startswith("tab-"):
             self._active_program_id = tab_id[4:]
             try:
-                terminal = self.query_one(f"#terminal-{self._active_program_id}", TerminalPane)
+                terminal = self.query_one(
+                    f"#terminal-{self._active_program_id}", TerminalPane
+                )
                 terminal.focus()
             except NoMatches:
                 pass
