@@ -136,7 +136,7 @@ With bearer token authentication:
 ```json
 {
   "mcpServers": {
-    "repl-mcp": {
+    "repl": {
       "type": "url",
       "url": "http://127.0.0.1:2222/mcp",
       "headers": {
@@ -150,7 +150,7 @@ With bearer token authentication:
 You can also add it via the CLI:
 
 ```bash
-claude mcp add repl-mcp --transport http http://127.0.0.1:2222/mcp
+claude mcp add repl --transport http http://127.0.0.1:2222/mcp
 ```
 
 ### Connecting Other MCP Clients

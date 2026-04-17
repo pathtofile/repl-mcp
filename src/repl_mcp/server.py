@@ -27,7 +27,7 @@ class ReplMCPServer:
         self._agent_counter = 0
         self._agents: dict[int, str] = {}  # id(session) -> label
 
-        self.mcp = FastMCP("repl-mcp")
+        self.mcp = FastMCP("repl")
         self._register_tools()
 
     def _get_agent_label(self, ctx: Context) -> str:
